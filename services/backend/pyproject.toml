@@ -1,0 +1,9 @@
+[project]
+name = "virtual-professor"
+version = "0.1.0"
+description = "AI-powered virtual professor with RAG and LiveAvatar"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

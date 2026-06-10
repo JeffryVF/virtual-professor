@@ -1,0 +1,34 @@
+# openspec/config.yaml
+schema: spec-driven
+
+context: |
+  Stack: Python 3.11 / FastAPI (backend) + Next.js 15 / React 19 / TypeScript 5 (frontend) + Kokoro ONNX (TTS microservice)
+  Architecture: Async FastAPI with SQLAlchemy 2.0 async, Pydantic v2, LlamaIndex RAG, Qdrant vector DB, PostgreSQL, Redis caching, Docker Compose orchestration
+  Testing: pytest + pytest-asyncio + httpx installed in conda env `aiedu`. pytest-cov for coverage. Strict TDD enabled for backend.
+  Style: async/await throughout, type hints, Pydantic settings, clean router/service/core separation
+
+rules:
+  proposal:
+    - Include risk assessment for changes touching RAG pipeline or LiveAvatar integration
+    - Scope each proposal to a single vertical concern
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows (especially STT→RAG→LLM→TTS pipeline)
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    - Follow existing code patterns (async, SQLAlchemy 2.0, Pydantic v2)
+    - Write tests BEFORE implementation code (Strict TDD)
+    - Run tests after each batch; never skip failing tests
+    tdd: true
+    test_command: conda run -n aiedu python -m pytest services/backend/tests -v
+  verify:
+    test_command: conda run -n aiedu python -m pytest services/backend/tests -v --cov=services/backend --cov-report=term
+    build_command: conda run -n aiedu python -m compileall services/backend
+    coverage_threshold: 80
+  archive:
+    - Warn before merging destructive deltas

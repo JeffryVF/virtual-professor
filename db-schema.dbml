@@ -1,0 +1,47 @@
+Table professors {
+  id UUID [primary key]
+  name VARCHAR [not null]
+  topic VARCHAR [not null]
+  language VARCHAR [not null, note: 'es | en | both']
+  avatar_id VARCHAR [not null]
+  collection VARCHAR [not null, note: 'Qdrant collection name']
+  system_prompt TEXT [not null]
+  created_at TIMESTAMP [default: `now()`]
+}
+
+Table documents {
+  id UUID [primary key]
+  professor_id UUID [not null, ref: > professors.id, note: 'FK → professors']
+  filename VARCHAR [not null]
+  format VARCHAR [not null, note: 'pdf | docx | pptx | txt | mp3 | mp4 | url | csv | json']
+  status VARCHAR [not null, note: 'pending | processing | ready | error']
+  chunk_count INTEGER [default: 0]
+  error_message TEXT
+  uploaded_at TIMESTAMP [default: `now()`]
+}
+
+Table students {
+  id UUID [primary key]
+  name VARCHAR [not null]
+  email VARCHAR [not null, unique]
+  language VARCHAR [not null, note: 'es | en']
+  created_at TIMESTAMP [default: `now()`]
+}
+
+Table sessions {
+  id UUID [primary key]
+  student_id UUID [not null, ref: > students.id, note: 'FK → students']
+  professor_id UUID [not null, ref: > professors.id, note: 'FK → professors']
+  started_at TIMESTAMP [default: `now()`]
+  ended_at TIMESTAMP
+  credits_used FLOAT [default: 0]
+}
+
+Table messages {
+  id UUID [primary key]
+  session_id UUID [not null, ref: > sessions.id, note: 'FK → sessions']
+  role VARCHAR [not null, note: 'student | professor']
+  content TEXT [not null]
+  audio_path VARCHAR
+  timestamp TIMESTAMP [default: `now()`]
+}
