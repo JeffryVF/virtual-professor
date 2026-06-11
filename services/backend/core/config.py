@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     reranker_top_n: int = 5  # chunks passed to cross-encoder
     reranker_device: str = "cpu"
 
+    # Upload validation
+    upload_max_size_mb: int = 50
+    upload_max_pages: int = 200
+    upload_allowed_formats: str = "pdf,docx,pptx,mp3,mp4,wav,ogg,m4a,url"
+
     # CORS — comma-separated origins, or "*" for development
     cors_origins: str = "*"
 

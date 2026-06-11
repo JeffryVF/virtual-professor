@@ -32,3 +32,17 @@ rules:
     coverage_threshold: 80
   archive:
     - Warn before merging destructive deltas
+
+quality_tools:
+  linter:
+    available: false
+    command: —
+    note: No linter installed (flake8/pylint/ruff not found in conda env or system)
+  type_checker:
+    available: false
+    command: —
+    note: No type checker installed (mypy/pyright not found in conda env or system)
+  formatter:
+    available: false
+    command: —
+    note: No formatter installed (black/isort/ruff not found in conda env or system)

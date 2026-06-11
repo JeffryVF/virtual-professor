@@ -3,6 +3,7 @@ import shutil
 import uuid
 from uuid import UUID
 
+import magic
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Security, UploadFile
 from fastapi.security import APIKeyHeader
 from sqlalchemy import select
@@ -21,6 +22,78 @@ from models.schemas import (
     SessionResponse,
 )
 from services.ingestion import delete_document_chunks, delete_qdrant_collection, ingest_document
+
+# Structured error codes for pre-upload validation
+# Maps error_code -> (http_status, default_message)
+ERROR_RESPONSES: dict[str, tuple[int, str]] = {
+    "EXTENSION_NOT_ALLOWED": (400, "File extension is not in the allowed formats list"),
+    "INVALID_FILE_TYPE": (400, "File MIME type does not match its declared extension"),
+    "FILE_TOO_LARGE": (413, "File size exceeds the maximum allowed size"),
+}
+
+
+def validate_upload_file(
+    file: UploadFile,
+    max_size_mb: int,
+    allowed_formats: list[str],
+) -> tuple[bool, str | None, str | None]:
+    """Validate an uploaded file before saving it to disk.
+
+    Checks (in order):
+      1. Extension is in the allowed list
+      2. MIME type (via magic bytes) matches the claimed extension
+      3. File size does not exceed the limit
+
+    After reading magic bytes, the file pointer is seeked back to 0.
+
+    Returns (is_valid, error_code, error_message).
+    """
+    # 1. Extension check
+    ext = os.path.splitext(file.filename or "")[1].lstrip(".").lower()
+    if not ext or ext not in allowed_formats:
+        return (
+            False,
+            "EXTENSION_NOT_ALLOWED",
+            f"File extension '.{ext}' is not allowed. Allowed: {', '.join(allowed_formats)}",
+        )
+
+    # 2. MIME type check (for formats with predictable magic bytes)
+    magic_bytes = file.file.read(4096)
+    try:
+        detected_mime = magic.from_buffer(magic_bytes, mime=True)
+    except Exception:
+        detected_mime = ""
+
+    file.file.seek(0)
+
+    _EXPECTED_MIME_PREFIXES = {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml",
+    }
+    expected_prefix = _EXPECTED_MIME_PREFIXES.get(ext)
+    if expected_prefix and not detected_mime.startswith(expected_prefix):
+        return (
+            False,
+            "INVALID_FILE_TYPE",
+            f"File MIME type '{detected_mime}' does not match extension '.{ext}'",
+        )
+
+    # 3. File size check
+    file.file.seek(0, 2)  # seek to end
+    size_bytes = file.file.tell()
+    file.file.seek(0)
+
+    max_bytes = max_size_mb * 1024 * 1024
+    if size_bytes > max_bytes:
+        size_mb = size_bytes / (1024 * 1024)
+        return (
+            False,
+            "FILE_TOO_LARGE",
+            f"File size {size_mb:.1f} MB exceeds maximum of {max_size_mb} MB",
+        )
+
+    return (True, None, None)
 
 router = APIRouter()
 
@@ -119,6 +192,20 @@ async def upload_document(
     prof = result.scalar_one_or_none()
     if not prof:
         raise HTTPException(status_code=404, detail="Professor not found")
+
+    # Pre-upload validation
+    allowed = settings.upload_allowed_formats.split(",")
+    is_valid, err_code, err_msg = validate_upload_file(
+        file,
+        max_size_mb=settings.upload_max_size_mb,
+        allowed_formats=allowed,
+    )
+    if not is_valid:
+        status_code, default_msg = ERROR_RESPONSES.get(err_code or "", (400, "Validation failed"))
+        raise HTTPException(
+            status_code=status_code,
+            detail={"error": {"code": err_code, "message": err_msg or default_msg}},
+        )
 
     ext = os.path.splitext(file.filename or "")[1].lstrip(".").lower() or "bin"
     doc_id = uuid.uuid4()

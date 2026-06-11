@@ -50,6 +50,7 @@ async def test_source_filename_injected_into_node_metadata():
         patch("services.ingestion.QdrantClient"),
         patch("services.ingestion.OllamaEmbedding"),
         patch("services.ingestion._ensure_collection", new=AsyncMock()),
+        patch("services.ingestion._validate_document", return_value=(True, "")),
         patch("services.ingestion.SentenceSplitter.get_nodes_from_documents") as mock_splitter,
         patch("services.ingestion.VectorStoreIndex", VectorStoreIndexSpy),
         patch.dict("services.ingestion._FORMAT_READERS", {"pdf": mock_reader_cls}),
