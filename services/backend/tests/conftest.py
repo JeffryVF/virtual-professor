@@ -26,12 +26,13 @@ os.environ.setdefault("LIVEAVATAR_API_URL", "http://localhost:8080")
 os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 os.environ.setdefault("SESSION_MEMORY_MESSAGES", "10")
 os.environ.setdefault("SESSION_TIMEOUT_MINUTES", "30")
+os.environ.setdefault("RAG_MIN_RELEVANCE_SCORE", "0.0")
 # ─────────────────────────────────────────────────────────────────────────────
 
 from main import app  # noqa: E402
 
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def setup_database():
     """Create all tables once per test session.
 

@@ -7,10 +7,10 @@ RAG pipeline always returns top_k=5 chunks regardless of relevance. When no chun
 ## Scope
 
 ### In Scope
-- Relevance score filter in `rag.py` with configurable threshold
+- Relevance score filter in `rag.py` with threshold from env
 - Graceful empty-context response from `llm.py`
 - Professor notification when scope passes but threshold fails
-- Config setting in `config.py` with env override
+- Required `RAG_MIN_RELEVANCE_SCORE` env var in `core/config.py` (no hardcoded default)
 
 ### Out of Scope
 - Reranker (CRIT-02, future Release 2)
@@ -28,7 +28,7 @@ RAG pipeline always returns top_k=5 chunks regardless of relevance. When no chun
 
 ## Approach
 
-1. **`core/config.py`** — Add `rag_min_relevance_score: float = 0.75`
+1. **`core/config.py`** — Add `rag_min_relevance_score: float` read from required `RAG_MIN_RELEVANCE_SCORE` env var (no hardcoded default)
 2. **`services/rag.py`** — Filter nodes by `node.score >= settings.rag_min_relevance_score`; return `[]` if none pass
 3. **`services/llm.py`** — Accept empty `context_chunks` → return `"No encontré información sobre eso en mis fuentes"`
 4. **`routers/sessions.py`** — After scope check passes, if context is empty → log + notify professor (async fire-and-forget)
@@ -48,8 +48,8 @@ RAG pipeline always returns top_k=5 chunks regardless of relevance. When no chun
 
 | Risk | Likelihood | Mitigation |
 |------|------------|------------|
-| Threshold too high (false negatives) | Medium | Default 0.75 pre-validated; fully configurable via env |
-| Threshold too low (false positives persist) | Low | Start at 0.75, tune with real data |
+| Threshold too high (false negatives) | Medium | Set via `.env`, tunable without code deploy |
+| Threshold too low (false positives persist) | Low | Start at 0.75 (set in `.env`), tune with real data |
 | Notification adds latency | Low | Fire-and-forget logging + DB write, non-blocking |
 
 ## Rollback Plan
@@ -65,5 +65,5 @@ Set `RAG_MIN_RELEVANCE_SCORE=0.0` in `.env` → all chunks pass → behavior ide
 - [ ] Query matching existing content → chunks returned with score >= 0.75
 - [ ] Query with no relevant content → `"No encontré información sobre eso en mis fuentes"`
 - [ ] Scope check passes + threshold fails → professor notification logged
-- [ ] Threshold overridable via `.env` or `Settings` constructor
+- [ ] Threshold set via `RAG_MIN_RELEVANCE_SCORE` in `.env` — failure to set it prevents app startup
 - [ ] All existing tests pass

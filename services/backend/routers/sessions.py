@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
-from models.db import Message, MessageRole, Professor, Student
+from models.db import Message, MessageRole, Professor, Student, ThresholdNotification
 from models.db import Session as DBSession
 from models.schemas import (
     MessageResponse,
@@ -100,6 +100,20 @@ async def speak(
             )
         else:
             context_chunks = await rag.retrieve_context(transcript, professor.collection)
+
+            # Fire-and-forget notification when scope passes but threshold filters all chunks
+            if not context_chunks:
+                log.warning(
+                    "RAG threshold filter eliminated all chunks for professor %s — query: %s",
+                    professor.id,
+                    transcript,
+                )
+                db.add(ThresholdNotification(
+                    professor_id=professor.id,
+                    query=transcript,
+                ))
+                await db.commit()
+
             response_text = await llm.generate_response(
                 system_prompt=professor.system_prompt,
                 history=history,

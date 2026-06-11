@@ -1,20 +1,63 @@
 import logging
 
 from llama_index.core import StorageContext, VectorStoreIndex
+from llama_index.core.schema import NodeWithScore
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from core.config import settings
+from services.reranker import BGELocalReranker
 
 log = logging.getLogger(__name__)
 
 TOP_K = 5
 
+# ── Reranker singleton ──────────────────────────────────────────────────────
+
+_reranker_instance: BGELocalReranker | None = None
+
+
+def _reset_reranker() -> None:
+    """Reset the reranker singleton (exposed for test isolation).
+
+    Call this between tests that manipulate ``_get_reranker`` with mocks.
+    """
+    global _reranker_instance
+    _reranker_instance = None
+
+
+def _get_reranker() -> BGELocalReranker:
+    """Return the application-wide reranker singleton (lazy-init)."""
+    global _reranker_instance
+    if _reranker_instance is None:
+        _reranker_instance = BGELocalReranker(
+            model=settings.reranker_model,
+            top_n=settings.reranker_top_n,
+            device=settings.reranker_device,
+        )
+    return _reranker_instance
+
+
+# ── Core pipeline ───────────────────────────────────────────────────────────
+
+
+def filter_nodes_by_score(nodes: list[NodeWithScore], min_score: float) -> list[NodeWithScore]:
+    """Filter nodes by minimum relevance score.
+
+    Returns only nodes where ``node.score >= min_score``.
+    Returns empty list if no nodes pass the threshold.
+    """
+    return [node for node in nodes if node.score >= min_score]
+
 
 async def retrieve_context(query: str, professor_collection: str, top_k: int = TOP_K) -> list[str]:
-    """Retrieve the top-k relevant chunks from the professor's Qdrant collection."""
+    """Retrieve the top-k relevant chunks from the professor's Qdrant collection.
+
+    Retrieved nodes are filtered by ``settings.rag_min_relevance_score``.
+    Returns an empty list if no nodes meet the threshold.
+    """
     aclient = AsyncQdrantClient(
         url=settings.qdrant_url,
         timeout=30,
@@ -42,7 +85,21 @@ async def retrieve_context(query: str, professor_collection: str, top_k: int = T
         index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
         retriever = index.as_retriever(similarity_top_k=top_k)
         nodes = await retriever.aretrieve(query)
-        return [node.get_content() for node in nodes]
+
+        # ── Reranker step ────────────────────────────────────────────────
+        if settings.reranker_type != "none":
+            try:
+                reranker = _get_reranker()
+                top_n = settings.reranker_top_n
+                indices = reranker.rerank(query, nodes[:top_n])
+                reranked_part = [nodes[i] for i in indices]
+                nodes = reranked_part + nodes[top_n:]
+            except Exception as exc:
+                log.warning("Reranker failed, falling back to original order: %s", exc)
+        # ──────────────────────────────────────────────────────────────────
+
+        filtered = filter_nodes_by_score(nodes, settings.rag_min_relevance_score)
+        return [node.get_content() for node in filtered]
     except UnexpectedResponse as exc:
         if getattr(exc, "status_code", None) == 404:
             return []

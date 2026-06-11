@@ -7,13 +7,24 @@ from core.config import settings
 log = logging.getLogger(__name__)
 
 
+GRACEFUL_NO_CONTEXT = "No encontré información sobre eso en mis fuentes"
+
+
 async def generate_response(
     system_prompt: str,
     history: list[dict],
     context_chunks: list[str],
     query: str,
 ) -> str:
-    """Build a prompt with RAG context and conversation history, call Ollama."""
+    """Build a prompt with RAG context and conversation history, call Ollama.
+
+    If ``context_chunks`` is empty, returns a graceful message immediately
+    without calling Ollama. This prevents hallucination from garbage-in input.
+    """
+    if not context_chunks:
+        log.info("Empty context after RAG threshold filter — returning graceful message")
+        return GRACEFUL_NO_CONTEXT
+
     context = "\n\n---\n\n".join(context_chunks)
     history_text = "\n".join(f"{msg['role']}: {msg['content']}" for msg in history)
     prompt = (

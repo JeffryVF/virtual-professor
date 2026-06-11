@@ -19,3 +19,8 @@ llama-index-readers-file>=0.1.0
 
 # Vector DB client
 qdrant-client>=1.9.0
+
+# Reranker (cross-encoder)
+llama-index-postprocessor-sbert-rerank>=0.5.0
+sentence-transformers>=3.0.0
+torch>=2.0.0  # CPU-only in Dockerfile; added here for explicit dep tracking

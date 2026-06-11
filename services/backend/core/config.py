@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     session_memory_messages: int = 10
     session_timeout_minutes: int = 30
 
+    # RAG
+    rag_min_relevance_score: float
+
+    # Reranker
+    reranker_type: str = "none"  # "bge" enables, "none" disables
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_top_n: int = 5  # chunks passed to cross-encoder
+    reranker_device: str = "cpu"
+
     # CORS — comma-separated origins, or "*" for development
     cors_origins: str = "*"
 
