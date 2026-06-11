@@ -121,6 +121,15 @@ async def ingest_document(
             raise
 
 
+async def delete_qdrant_collection(collection_name: str) -> None:
+    """Delete the entire Qdrant collection (used when removing a professor)."""
+    client = QdrantClient(url=settings.qdrant_url)
+    existing = {c.name for c in client.get_collections().collections}
+    if collection_name in existing:
+        client.delete_collection(collection_name=collection_name)
+    client.close()
+
+
 async def delete_document_chunks(professor_collection: str, document_id: str) -> None:
     """Remove all Qdrant points that belong to a specific document."""
     from qdrant_client.models import FieldCondition, Filter, MatchValue

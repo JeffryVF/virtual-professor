@@ -20,7 +20,7 @@ from models.schemas import (
     ProfessorUpdate,
     SessionResponse,
 )
-from services.ingestion import delete_document_chunks, ingest_document
+from services.ingestion import delete_document_chunks, delete_qdrant_collection, ingest_document
 
 router = APIRouter()
 
@@ -100,7 +100,7 @@ async def delete_professor(
     prof = result.scalar_one_or_none()
     if not prof:
         raise HTTPException(status_code=404, detail="Professor not found")
-    # TODO: delete the Qdrant collection for this professor
+    await delete_qdrant_collection(prof.collection)
     await db.delete(prof)
     await db.commit()
 
