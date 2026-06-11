@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # Session settings
     session_memory_messages: int = 10
+    session_memory_max_tokens: int = 4096
     session_timeout_minutes: int = 30
 
     # RAG

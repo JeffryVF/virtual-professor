@@ -188,6 +188,14 @@ async def liveavatar_connect(session_id: UUID, db: AsyncSession = Depends(get_db
         raise HTTPException(status_code=500, detail=f"Internal error: {type(exc).__name__}: {exc}")
 
 
+@router.post("/{session_id}/compress")
+async def compress_session_history(session_id: UUID):
+    """Compress the in-memory session history by trimming oldest messages
+    until total estimated tokens fit within the configured budget."""
+    removed = await memory.compress_history(str(session_id))
+    return {"removed": removed, "session_id": str(session_id)}
+
+
 @router.get("/{session_id}/history", response_model=list[MessageResponse])
 async def get_history(session_id: UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
