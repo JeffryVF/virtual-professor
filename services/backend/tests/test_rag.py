@@ -12,6 +12,33 @@ from llama_index.core.schema import NodeWithScore, TextNode
 from core.config import settings
 from services.rag import filter_nodes_by_score
 
+
+# ── Phase 1: Configuration tests (rag-retrieve-scale) ──────────────────────
+
+
+class TestRagRetrieveScaleConfig:
+    """Tests for the new RAG retrieval scale config parameters."""
+
+    def test_rag_retrieval_top_k_defaults_to_40(self):
+        """GIVEN no RAG_RETRIEVAL_TOP_K env var
+        WHEN Settings is created
+        THEN rag_retrieval_top_k SHALL be 40.
+        """
+        from core.config import Settings as RagSettings
+
+        s = RagSettings()
+        assert s.rag_retrieval_top_k == 40
+
+    def test_reranker_top_n_defaults_to_6(self):
+        """GIVEN no RERANKER_TOP_N env var
+        WHEN Settings is created
+        THEN reranker_top_n SHALL be 6.
+        """
+        from core.config import Settings as RagSettings
+
+        s = RagSettings()
+        assert s.reranker_top_n == 6
+
 # Import must fail initially — ContextChunk doesn't exist yet (RED phase)
 from models.schemas import ContextChunk
 
@@ -136,7 +163,7 @@ async def test_retrieve_context_applies_filter_integration():
         result = await retrieve_context(
             query="test query",
             professor_collection="prof_collection",
-            top_k=5,
+            top_k=40,
         )
 
     # With default RAG_MIN_RELEVANCE_SCORE=0.0 in test env, ALL nodes pass
@@ -240,7 +267,7 @@ class TestRetrieveContextWithReranker:
             result = await retrieve_context(
                 query="test",
                 professor_collection="test_collection",
-                top_k=5,
+                top_k=40,
             )
 
         # B scored 0.9 → first, C scored 0.5 → second, A scored 0.2 → third
@@ -281,7 +308,7 @@ class TestRetrieveContextWithReranker:
             result = await retrieve_context(
                 query="test",
                 professor_collection="test_collection",
-                top_k=5,
+                top_k=40,
             )
 
         assert len(result) == 3
@@ -328,7 +355,7 @@ class TestRetrieveContextWithReranker:
             result = await retrieve_context(
                 query="test",
                 professor_collection="test_collection",
-                top_k=5,
+                top_k=40,
             )
 
         # Original order preserved on error
@@ -340,7 +367,9 @@ class TestRetrieveContextWithReranker:
 
     @pytest.mark.asyncio
     async def test_reranker_top_n_limits_reranked_chunks(self):
-        """GIVEN reranker_top_n=2 AND 5 chunks WHEN retrieve_context THEN only 2 reranked."""
+        """GIVEN reranker_top_n=2 AND 5 chunks
+        WHEN retrieve_context
+        THEN ALL 5 chunks reach reranker AND only 2 survive post-rerank truncation."""
         from services.rag import _reset_reranker, retrieve_context  # noqa: PLC0415
 
         _reset_reranker()
@@ -379,7 +408,7 @@ class TestRetrieveContextWithReranker:
                 reranker_inputs.append(
                     [n.node.text for n in chunks]
                 )
-                # Only 2 chunks are passed — return them in score order
+                # ALL chunks are passed — return reordered by score desc
                 sorted_chunks = sorted(
                     chunks, key=lambda n: n.score, reverse=True
                 )
@@ -398,19 +427,216 @@ class TestRetrieveContextWithReranker:
             result = await retrieve_context(
                 query="test",
                 professor_collection="test_collection",
-                top_k=5,
+                top_k=40,
             )
 
-        # Only top 2 (by retrieval order: chunk 0, chunk 1) were passed to reranker
+        # ALL 5 chunks were passed to reranker (no pre-reranker cap)
         assert len(reranker_inputs) == 1
-        assert reranker_inputs[0] == ["chunk 0", "chunk 1"]
-        # After reranking: chunk 1 (0.9) then chunk 0 (0.1),
-        # then chunks 2, 3, 4 preserved in original order
+        assert len(reranker_inputs[0]) == 5
+        # Post-reranker truncation to reranker_top_n=2
+        assert len(result) == 2
+        # Chunk 1 (0.9) and Chunk 2 (0.8) are the top-2 by score
         assert result[0].text == "chunk 1"
-        assert result[1].text == "chunk 0"
-        assert result[2].text == "chunk 2"
-        assert result[3].text == "chunk 3"
-        assert result[4].text == "chunk 4"
+        assert result[1].text == "chunk 2"
+
+    # ── 2.1 RED / 2.2 GREEN: reranker receives ALL nodes ─────────────────
+
+    @pytest.mark.asyncio
+    async def test_reranker_receives_all_nodes_when_enabled(self):
+        """GIVEN reranker_type=bge AND 8 nodes WHEN retrieve_context
+        THEN reranker.rerank SHALL receive ALL 8 nodes (not just first 6)."""
+        from services.rag import _reset_reranker, retrieve_context  # noqa: PLC0415
+
+        _reset_reranker()
+        nodes = [_make_node(f"chunk {i}", 0.1 * (i + 1)) for i in range(8)]
+        mock_retriever, mock_index, mock_collections = (
+            self._make_retriever_mock(nodes)
+        )
+
+        with (
+            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
+            patch(self._qdrant_patches[1]),
+            patch(self._qdrant_patches[2]),
+            patch(self._qdrant_patches[3], return_value=mock_index),
+            patch.object(settings, "reranker_type", "bge"),
+            patch.object(settings, "reranker_top_n", 3),
+            patch("services.rag.BGELocalReranker") as mock_bge_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client.get_collections = AsyncMock(
+                return_value=mock_collections
+            )
+            mock_qdrant_cls.return_value = mock_client
+
+            mock_reranker = MagicMock()
+            reranker_inputs = []
+
+            def rerank_side_effect(query, chunks):
+                reranker_inputs.append([n.node.text for n in chunks])
+                # Return indices in original order
+                return list(range(len(chunks)))
+
+            mock_reranker.rerank.side_effect = rerank_side_effect
+            mock_bge_cls.return_value = mock_reranker
+
+            result = await retrieve_context(
+                query="test",
+                professor_collection="test_collection",
+                top_k=40,
+            )
+
+        # All 8 nodes were passed to reranker (not just first 3)
+        assert len(reranker_inputs) == 1
+        assert len(reranker_inputs[0]) == 8
+        # After rerank, truncation to reranker_top_n=3 applies
+        assert len(result) == 3
+
+    # ── 2.1 RED / 2.2 GREEN: unconditional truncation with reranker disabled ─
+
+    @pytest.mark.asyncio
+    async def test_unconditional_truncation_with_reranker_disabled(self):
+        """GIVEN reranker_type=none AND reranker_top_n=3 AND 10 nodes
+        WHEN retrieve_context THEN only first 3 nodes SHALL be returned
+        (truncation is unconditional — applies even without reranker)."""
+        nodes = [_make_node(f"node {i}", 0.9) for i in range(10)]
+        mock_retriever, mock_index, mock_collections = (
+            self._make_retriever_mock(nodes)
+        )
+
+        with (
+            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
+            patch(self._qdrant_patches[1]),
+            patch(self._qdrant_patches[2]),
+            patch(self._qdrant_patches[3], return_value=mock_index),
+            patch.object(settings, "reranker_type", "none"),
+            patch.object(settings, "reranker_top_n", 3),
+        ):
+            mock_client = MagicMock()
+            mock_client.get_collections = AsyncMock(
+                return_value=mock_collections
+            )
+            mock_qdrant_cls.return_value = mock_client
+
+            from services.rag import retrieve_context  # noqa: PLC0415
+
+            result = await retrieve_context(
+                query="test",
+                professor_collection="test_collection",
+                top_k=40,
+            )
+
+        # With reranker_top_n=3, only 3 of 10 nodes survive truncation
+        assert len(result) == 3
+        # Truncation keeps first 3 in original retrieval order
+        assert result[0].text == "node 0"
+        assert result[1].text == "node 1"
+        assert result[2].text == "node 2"
+
+    # ── 4.2 Edge case: rag_retrieval_top_k smaller than reranker_top_n ────────
+
+    @pytest.mark.asyncio
+    async def test_rag_retrieval_top_k_smaller_than_reranker_top_n(self):
+        """GIVEN 3 nodes (rag_retrieval_top_k=3) AND reranker_top_n=6
+        WHEN retrieve_context THEN all 3 pass through (no IndexError)."""
+        nodes = [_make_node(f"node {i}", 0.9) for i in range(3)]
+        mock_retriever, mock_index, mock_collections = (
+            self._make_retriever_mock(nodes)
+        )
+
+        with (
+            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
+            patch(self._qdrant_patches[1]),
+            patch(self._qdrant_patches[2]),
+            patch(self._qdrant_patches[3], return_value=mock_index),
+            patch.object(settings, "reranker_type", "none"),
+        ):
+            mock_client = MagicMock()
+            mock_client.get_collections = AsyncMock(
+                return_value=mock_collections
+            )
+            mock_qdrant_cls.return_value = mock_client
+
+            from services.rag import retrieve_context  # noqa: PLC0415
+
+            result = await retrieve_context(
+                query="test",
+                professor_collection="test_collection",
+                top_k=None,
+            )
+
+        # All 3 nodes survive (reranker_top_n=6 is larger, no truncation)
+        assert len(result) == 3
+        assert result[0].text == "node 0"
+        assert result[1].text == "node 1"
+        assert result[2].text == "node 2"
+
+    # ── 4.2 Edge case: retrieval with reranker enabled, small pool ────────
+
+    @pytest.mark.asyncio
+    async def test_rag_retrieval_top_k_smaller_than_reranker_top_n_with_reranker(self):
+        """GIVEN reranker enabled AND 3 retrieved nodes AND reranker_top_n=6
+        WHEN retrieve_context THEN all 3 pass through reranker and truncation."""
+        from services.rag import _reset_reranker, retrieve_context  # noqa: PLC0415
+
+        _reset_reranker()
+        nodes = [_make_node(f"node {i}", 0.1 * (i + 1)) for i in range(3)]
+        mock_retriever, mock_index, mock_collections = (
+            self._make_retriever_mock(nodes)
+        )
+
+        with (
+            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
+            patch(self._qdrant_patches[1]),
+            patch(self._qdrant_patches[2]),
+            patch(self._qdrant_patches[3], return_value=mock_index),
+            patch.object(settings, "reranker_type", "bge"),
+            patch("services.rag.BGELocalReranker") as mock_bge_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client.get_collections = AsyncMock(
+                return_value=mock_collections
+            )
+            mock_qdrant_cls.return_value = mock_client
+
+            mock_reranker = MagicMock()
+            mock_reranker.rerank.return_value = [0, 1, 2]  # preserve order
+            mock_bge_cls.return_value = mock_reranker
+
+            result = await retrieve_context(
+                query="test",
+                professor_collection="test_collection",
+                top_k=None,
+            )
+
+        # All 3 chunks pass through (truncation to 6 doesn't cut)
+        assert len(result) == 3
+        assert result[0].text == "node 0"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 3 — Reranker coupling tests (rag-retrieve-scale)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestRerankerCoupling:
+    """Tests for the _get_reranker top_n coupling change.
+
+    top_n must now equal rag_retrieval_top_k so SentenceTransformerRerank
+    scores the full candidate pool instead of culling early.
+    """
+
+    def test_get_reranker_uses_rag_retrieval_top_k(self):
+        """GIVEN settings.rag_retrieval_top_k=40
+        WHEN _get_reranker() constructs BGELocalReranker
+        THEN top_n SHALL equal settings.rag_retrieval_top_k.
+        """
+        from services.rag import _reset_reranker, _get_reranker  # noqa: PLC0415
+
+        _reset_reranker()
+        with patch("services.rag.BGELocalReranker") as mock_bge_cls:
+            _get_reranker()
+            call_kwargs = mock_bge_cls.call_args.kwargs
+            assert call_kwargs["top_n"] == settings.rag_retrieval_top_k
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -537,7 +763,7 @@ class TestRetrieveContextTypedChunks:
             result = await retrieve_context(
                 query="test",
                 professor_collection="test_collection",
-                top_k=5,
+                top_k=40,
             )
 
         assert len(result) == 3
@@ -571,7 +797,7 @@ class TestRetrieveContextTypedChunks:
             result = await retrieve_context(
                 query="test",
                 professor_collection="nonexistent",
-                top_k=5,
+                top_k=40,
             )
 
         assert result == []
@@ -637,7 +863,7 @@ class TestFallbackChain:
             result = await retrieve_context(
                 query="test",
                 professor_collection="test_collection",
-                top_k=5,
+                top_k=40,
             )
 
         assert len(result) == 1
@@ -678,7 +904,7 @@ class TestFallbackChain:
             result = await retrieve_context(
                 query="test",
                 professor_collection="test_collection",
-                top_k=5,
+                top_k=40,
             )
 
         assert len(result) == 1
@@ -719,7 +945,7 @@ class TestFallbackChain:
             result = await retrieve_context(
                 query="test",
                 professor_collection="test_collection",
-                top_k=5,
+                top_k=40,
             )
 
         assert len(result) == 1

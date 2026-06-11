@@ -13,8 +13,6 @@ from services.reranker import BGELocalReranker
 
 log = logging.getLogger(__name__)
 
-TOP_K = 5
-
 # ── Reranker singleton ──────────────────────────────────────────────────────
 
 _reranker_instance: BGELocalReranker | None = None
@@ -35,7 +33,7 @@ def _get_reranker() -> BGELocalReranker:
     if _reranker_instance is None:
         _reranker_instance = BGELocalReranker(
             model=settings.reranker_model,
-            top_n=settings.reranker_top_n,
+            top_n=settings.rag_retrieval_top_k,
             device=settings.reranker_device,
         )
     return _reranker_instance
@@ -53,7 +51,12 @@ def filter_nodes_by_score(nodes: list[NodeWithScore], min_score: float) -> list[
     return [node for node in nodes if node.score >= min_score]
 
 
-async def retrieve_context(query: str, professor_collection: str, top_k: int = TOP_K) -> list[str]:
+async def retrieve_context(
+    query: str,
+    professor_collection: str,
+    top_k: int | None = None,
+    trace_id: str | None = None,
+) -> list[ContextChunk]:
     """Retrieve the top-k relevant chunks from the professor's Qdrant collection.
 
     Retrieved nodes are filtered by ``settings.rag_min_relevance_score``.
@@ -84,20 +87,21 @@ async def retrieve_context(query: str, professor_collection: str, top_k: int = T
             aclient=aclient,
         )
         index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
-        retriever = index.as_retriever(similarity_top_k=top_k)
+        retriever = index.as_retriever(similarity_top_k=top_k or settings.rag_retrieval_top_k)
         nodes = await retriever.aretrieve(query)
 
         # ── Reranker step ────────────────────────────────────────────────
         if settings.reranker_type != "none":
             try:
                 reranker = _get_reranker()
-                top_n = settings.reranker_top_n
-                indices = reranker.rerank(query, nodes[:top_n])
-                reranked_part = [nodes[i] for i in indices]
-                nodes = reranked_part + nodes[top_n:]
+                indices = reranker.rerank(query, nodes)
+                nodes = [nodes[i] for i in indices]
             except Exception as exc:
                 log.warning("Reranker failed, falling back to original order: %s", exc)
         # ──────────────────────────────────────────────────────────────────
+
+        # Unconditional truncation to reranker_top_n (regardless of reranker status)
+        nodes = nodes[:settings.reranker_top_n]
 
         filtered = filter_nodes_by_score(nodes, settings.rag_min_relevance_score)
         return [
@@ -107,6 +111,7 @@ async def retrieve_context(query: str, professor_collection: str, top_k: int = T
                                 node.metadata.get("document_id", "")),
                 source_document_id=node.metadata.get("document_id", ""),
                 source_page=node.metadata.get("page_label", None),
+                trace_id=trace_id,
             )
             for node in filtered
         ]

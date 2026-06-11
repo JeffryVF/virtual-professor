@@ -41,13 +41,23 @@ class Settings(BaseSettings):
     # Reranker
     reranker_type: str = "none"  # "bge" enables, "none" disables
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
-    reranker_top_n: int = 5  # chunks passed to cross-encoder
+    reranker_top_n: int = 6  # chunks to keep after reranking
     reranker_device: str = "cpu"
+
+    # Retrieval
+    rag_retrieval_top_k: int = 40  # env: RAG_RETRIEVAL_TOP_K (chunks to retrieve from Qdrant)
 
     # Upload validation
     upload_max_size_mb: int = 50
     upload_max_pages: int = 200
     upload_allowed_formats: str = "pdf,docx,pptx,mp3,mp4,wav,ogg,m4a,url"
+
+    # Langfuse observability
+    langfuse_enable: bool = False
+    langfuse_secret_key: str = ""
+    langfuse_public_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+    langfuse_release: str = "0.1.0"
 
     # CORS — comma-separated origins, or "*" for development
     cors_origins: str = "*"
