@@ -8,6 +8,7 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from core.config import settings
+from models.schemas import ContextChunk
 from services.reranker import BGELocalReranker
 
 log = logging.getLogger(__name__)
@@ -99,7 +100,16 @@ async def retrieve_context(query: str, professor_collection: str, top_k: int = T
         # ──────────────────────────────────────────────────────────────────
 
         filtered = filter_nodes_by_score(nodes, settings.rag_min_relevance_score)
-        return [node.get_content() for node in filtered]
+        return [
+            ContextChunk(
+                text=node.get_content(),
+                source_document=node.metadata.get("source_filename",
+                                node.metadata.get("document_id", "")),
+                source_document_id=node.metadata.get("document_id", ""),
+                source_page=node.metadata.get("page_label", None),
+            )
+            for node in filtered
+        ]
     except UnexpectedResponse as exc:
         if getattr(exc, "status_code", None) == 404:
             return []

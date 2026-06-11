@@ -94,9 +94,14 @@ async def ingest_document(
             splitter = SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
             nodes = splitter.get_nodes_from_documents(documents)
 
+            # Fetch document for source_filename metadata
+            result = await db.execute(select(Document).where(Document.id == document_id))
+            doc = result.scalar_one()
+
             for node in nodes:
                 node.metadata["document_id"] = document_id
                 node.metadata["professor_collection"] = professor_collection
+                node.metadata["source_filename"] = doc.filename
 
             # Index into Qdrant
             vector_store = QdrantVectorStore(client=qdrant, collection_name=professor_collection)
@@ -104,8 +109,6 @@ async def ingest_document(
             VectorStoreIndex(nodes, storage_context=storage_context, embed_model=embed_model)
 
             # Mark document as ready
-            result = await db.execute(select(Document).where(Document.id == document_id))
-            doc = result.scalar_one()
             doc.status = DocumentStatus.ready
             doc.chunk_count = len(nodes)
             await db.commit()

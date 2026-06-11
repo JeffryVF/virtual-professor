@@ -101,6 +101,22 @@ class SessionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── RAG ───────────────────────────────────────────────────────────────────────
+
+class ContextChunk(BaseModel):
+    """A chunk of retrieved context with source document provenance.
+
+    Carries the chunk text along with metadata identifying which document
+    it came from, enabling the LLM to cite sources inline.
+    """
+
+    text: str
+    source_document: str
+    source_document_id: str
+    source_page: str | None = None
+    trace_id: str | None = None
+
+
 # ── Message ───────────────────────────────────────────────────────────────────
 
 class MessageResponse(BaseModel):

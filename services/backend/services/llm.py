@@ -3,6 +3,7 @@ import logging
 import httpx
 
 from core.config import settings
+from models.schemas import ContextChunk
 
 log = logging.getLogger(__name__)
 
@@ -13,24 +14,39 @@ GRACEFUL_NO_CONTEXT = "No encontré información sobre eso en mis fuentes"
 async def generate_response(
     system_prompt: str,
     history: list[dict],
-    context_chunks: list[str],
+    context_chunks: list[ContextChunk],
     query: str,
 ) -> str:
     """Build a prompt with RAG context and conversation history, call Ollama.
 
-    If ``context_chunks`` is empty, returns a graceful message immediately
-    without calling Ollama. This prevents hallucination from garbage-in input.
+    Each ``ContextChunk`` is prefixed with a ``[Source: filename]`` label when
+    ``source_document`` is non-empty.  If ``context_chunks`` is empty, returns
+    a graceful message immediately without calling Ollama.
     """
     if not context_chunks:
         log.info("Empty context after RAG threshold filter — returning graceful message")
         return GRACEFUL_NO_CONTEXT
 
-    context = "\n\n---\n\n".join(context_chunks)
+    # Build labeled context
+    labeled_chunks = []
+    for chunk in context_chunks:
+        if chunk.source_document:
+            labeled_chunks.append(f"[Source: {chunk.source_document}]\n{chunk.text}")
+        else:
+            labeled_chunks.append(chunk.text)
+    context = "\n\n---\n\n".join(labeled_chunks)
+
     history_text = "\n".join(f"{msg['role']}: {msg['content']}" for msg in history)
     prompt = (
         f"Conversation so far:\n{history_text}\n\n"
         f"Student question: {query}\n\n"
         f"Knowledge:\n{context}"
+    )
+
+    citation_instruction = (
+        "Cuando uses información de las fuentes, indica el documento "
+        "usando la etiqueta [Source: ...] que aparece antes del texto. "
+        "No inventes fuentes para fragmentos sin etiqueta."
     )
 
     async with httpx.AsyncClient(timeout=120) as client:
@@ -41,7 +57,8 @@ async def generate_response(
                 "system": (
                     f"{system_prompt}\n\n"
                     f"Use the following knowledge to answer the student's question. "
-                    f"If the answer is not in the knowledge, say you don't have that information."
+                    f"If the answer is not in the knowledge, say you don't have that information.\n\n"
+                    f"{citation_instruction}"
                 ),
                 "prompt": prompt,
                 "stream": False,
