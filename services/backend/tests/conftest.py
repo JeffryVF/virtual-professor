@@ -27,6 +27,7 @@ os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 os.environ.setdefault("SESSION_MEMORY_MESSAGES", "10")
 os.environ.setdefault("SESSION_TIMEOUT_MINUTES", "30")
 os.environ.setdefault("RAG_MIN_RELEVANCE_SCORE", "0.0")
+os.environ.setdefault("LANGFUSE_ENABLE", "false")
 # ─────────────────────────────────────────────────────────────────────────────
 
 from main import app  # noqa: E402

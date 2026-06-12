@@ -237,6 +237,10 @@ class TestRetrieveContextWithReranker:
                 "services.rag.BGELocalReranker"
             ) as mock_bge_cls,
         ):
+            mock_trace = MagicMock()
+            mock_span = MagicMock()
+            mock_trace.span.return_value = mock_span
+
             mock_client = MagicMock()
             mock_client.get_collections = AsyncMock(
                 return_value=mock_collections
@@ -268,6 +272,7 @@ class TestRetrieveContextWithReranker:
                 query="test",
                 professor_collection="test_collection",
                 top_k=40,
+                trace=mock_trace,
             )
 
         # B scored 0.9 → first, C scored 0.5 → second, A scored 0.2 → third
@@ -275,6 +280,25 @@ class TestRetrieveContextWithReranker:
         assert result[0].text == "chunk B (originally second)"
         assert result[1].text == "chunk C (originally third)"
         assert result[2].text == "chunk A (originally first)"
+        mock_trace.span.assert_called_once_with(name="reranker")
+        mock_span.update.assert_any_call(
+            input={
+                "query": "test",
+                "chunk_count": 3,
+                "scores": [0.2, 0.9, 0.5],
+            }
+        )
+        mock_span.update.assert_any_call(
+            output={
+                "order": [
+                    "chunk B (originally second)",
+                    "chunk C (originally third)",
+                    "chunk A (originally first)",
+                ],
+                "scores": [0.9, 0.5, 0.2],
+            }
+        )
+        mock_span.end.assert_called_once()
 
     # ── 3.1 RED / 3.2 GREEN: reranker disabled preserves original order ──
 
@@ -319,8 +343,8 @@ class TestRetrieveContextWithReranker:
     # ── 3.1 RED / 3.2 GREEN: error fallback preserves order + logs ───────
 
     @pytest.mark.asyncio
-    async def test_reranker_error_fallback_preserves_order(self):
-        """GIVEN reranker raises on load WHEN retrieve_context THEN original order."""
+    async def test_reranker_error_is_traced_and_raised(self):
+        """GIVEN reranker raises on load WHEN retrieve_context THEN the error propagates."""
         from services.rag import _reset_reranker, retrieve_context  # noqa: PLC0415
 
         _reset_reranker()
@@ -343,6 +367,10 @@ class TestRetrieveContextWithReranker:
                 "services.rag.BGELocalReranker"
             ) as mock_bge_cls,
         ):
+            mock_trace = MagicMock()
+            mock_span = MagicMock()
+            mock_trace.span.return_value = mock_span
+
             mock_client = MagicMock()
             mock_client.get_collections = AsyncMock(
                 return_value=mock_collections
@@ -352,16 +380,23 @@ class TestRetrieveContextWithReranker:
             # BGELocalReranker init raises
             mock_bge_cls.side_effect = OSError("Model not available")
 
-            result = await retrieve_context(
-                query="test",
-                professor_collection="test_collection",
-                top_k=40,
-            )
+            with pytest.raises(OSError, match="Model not available"):
+                await retrieve_context(
+                    query="test",
+                    professor_collection="test_collection",
+                    top_k=40,
+                    trace=mock_trace,
+                )
 
-        # Original order preserved on error
-        assert len(result) == 2
-        assert result[0].text == "stable A"
-        assert result[1].text == "stable B"
+        mock_trace.span.assert_called_once_with(name="reranker")
+        mock_span.update.assert_any_call(
+            input={"query": "test", "chunk_count": 2, "scores": [0.9, 0.5]}
+        )
+        mock_span.update.assert_any_call(
+            level="ERROR",
+            status_message="Model not available",
+        )
+        mock_span.end.assert_called_once()
 
     # ── 3.3 RED / 3.4 GREEN: top_n limits reranked chunks ───────────────
 

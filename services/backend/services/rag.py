@@ -9,6 +9,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 
 from core.config import settings
 from models.schemas import ContextChunk
+from services import langfuse as langfuse_helpers
 from services.reranker import BGELocalReranker
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ async def retrieve_context(
     professor_collection: str,
     top_k: int | None = None,
     trace_id: str | None = None,
+    trace: "LangfuseTrace | None" = None,
 ) -> list[ContextChunk]:
     """Retrieve the top-k relevant chunks from the professor's Qdrant collection.
 
@@ -75,7 +77,10 @@ async def retrieve_context(
 
         existing = {collection.name for collection in collections.collections}
         if professor_collection not in existing:
-            log.info("Collection %s not found in Qdrant, returning empty context", professor_collection)
+            log.info(
+                "Collection %s not found in Qdrant, returning empty context",
+                professor_collection,
+            )
             return []
 
         embed_model = OllamaEmbedding(
@@ -86,35 +91,14 @@ async def retrieve_context(
             collection_name=professor_collection,
             aclient=aclient,
         )
-        index = VectorStoreIndex.from_vector_store(vector_store, embed_model=embed_model)
-        retriever = index.as_retriever(similarity_top_k=top_k or settings.rag_retrieval_top_k)
+        index = VectorStoreIndex.from_vector_store(
+            vector_store,
+            embed_model=embed_model,
+        )
+        retriever = index.as_retriever(
+            similarity_top_k=top_k or settings.rag_retrieval_top_k
+        )
         nodes = await retriever.aretrieve(query)
-
-        # ── Reranker step ────────────────────────────────────────────────
-        if settings.reranker_type != "none":
-            try:
-                reranker = _get_reranker()
-                indices = reranker.rerank(query, nodes)
-                nodes = [nodes[i] for i in indices]
-            except Exception as exc:
-                log.warning("Reranker failed, falling back to original order: %s", exc)
-        # ──────────────────────────────────────────────────────────────────
-
-        # Unconditional truncation to reranker_top_n (regardless of reranker status)
-        nodes = nodes[:settings.reranker_top_n]
-
-        filtered = filter_nodes_by_score(nodes, settings.rag_min_relevance_score)
-        return [
-            ContextChunk(
-                text=node.get_content(),
-                source_document=node.metadata.get("source_filename",
-                                node.metadata.get("document_id", "")),
-                source_document_id=node.metadata.get("document_id", ""),
-                source_page=node.metadata.get("page_label", None),
-                trace_id=trace_id,
-            )
-            for node in filtered
-        ]
     except UnexpectedResponse as exc:
         if getattr(exc, "status_code", None) == 404:
             return []
@@ -128,3 +112,48 @@ async def retrieve_context(
             await aclient.close()
         except Exception:
             pass
+
+    # ── Reranker step ────────────────────────────────────────────────────
+    if settings.reranker_type != "none":
+        async with langfuse_helpers.create_span(trace, "reranker") as span:
+            try:
+                if span is not None:
+                    span.update(
+                        input={
+                            "query": query,
+                            "chunk_count": len(nodes),
+                            "scores": [node.score for node in nodes],
+                        }
+                    )
+                reranker = _get_reranker()
+                indices = reranker.rerank(query, nodes)
+                nodes = [nodes[i] for i in indices]
+                if span is not None:
+                    span.update(
+                        output={
+                            "order": [node.get_content() for node in nodes],
+                            "scores": [node.score for node in nodes],
+                        }
+                    )
+            except Exception as exc:
+                if span is not None:
+                    span.update(level="ERROR", status_message=str(exc))
+                log.warning("Reranker failed: %s", exc)
+                raise
+
+    # Unconditional truncation to reranker_top_n (regardless of reranker status)
+    nodes = nodes[:settings.reranker_top_n]
+
+    filtered = filter_nodes_by_score(nodes, settings.rag_min_relevance_score)
+    return [
+        ContextChunk(
+            text=node.get_content(),
+            source_document=node.metadata.get(
+                "source_filename", node.metadata.get("document_id", "")
+            ),
+            source_document_id=node.metadata.get("document_id", ""),
+            source_page=node.metadata.get("page_label", None),
+            trace_id=trace_id,
+        )
+        for node in filtered
+    ]

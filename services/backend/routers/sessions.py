@@ -18,6 +18,7 @@ from models.schemas import (
     StudentCreate,
     StudentResponse,
 )
+from services import langfuse as langfuse_helpers
 from services import llm, memory, rag, stt, tts
 from services.liveavatar import create_session_token, start_session
 
@@ -70,78 +71,128 @@ async def speak(
 
         prof_result = await db.execute(select(Professor).where(Professor.id == session.professor_id))
         professor = prof_result.scalar_one()
+        student_result = await db.execute(select(Student).where(Student.id == session.student_id))
+        student = student_result.scalar_one()
 
-        # 1. STT
-        audio_bytes = await audio.read()
+        trace = await langfuse_helpers.create_trace(
+            "speak",
+            metadata={
+                "professor_id": str(professor.id),
+                "professor_name": professor.name,
+                "session_id": str(session.id),
+                "student_id": str(student.id),
+            },
+        )
+
         try:
-            transcript = await stt.transcribe(audio_bytes)
-        except httpx.HTTPStatusError as exc:
-            log.warning("STT service error (HTTP %s): %s", exc.response.status_code, exc.response.text[:200])
-            transcript = ""
-        except Exception as exc:
-            log.warning("STT processing error: %s", exc)
-            transcript = ""
+            # 1. STT
+            audio_bytes = await audio.read()
+            async with langfuse_helpers.create_span(trace, "stt_transcribe") as span:
+                try:
+                    transcript = await stt.transcribe(audio_bytes)
+                    if span is not None:
+                        span.update(
+                            input={"audio_bytes": len(audio_bytes)},
+                            output={"transcript": transcript},
+                        )
+                except httpx.HTTPStatusError as exc:
+                    if span is not None:
+                        span.update(level="ERROR", status_message=f"HTTP {exc.response.status_code}: {exc.response.text[:200]}")
+                    log.warning("STT service error (HTTP %s): %s", exc.response.status_code, exc.response.text[:200])
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Speech-to-text service error on {exc.request.url}: {exc.response.text}",
+                    )
+                except Exception as exc:
+                    if span is not None:
+                        span.update(level="ERROR", status_message=str(exc))
+                    log.warning("STT processing error: %s", exc)
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Speech-to-text processing failed: {type(exc).__name__}: {exc!r}",
+                    )
 
-        # 2. Load conversation history from Redis
-        history = await memory.get_history(str(session_id))
+            # 2. Load conversation history from Redis
+            history = await memory.get_history(str(session_id))
 
-        # 3. Scope check + RAG + LLM
-        if not transcript.strip():
-            response_text = (
-                f"No pude entender tu audio. Intenta nuevamente sobre {professor.topic}. / "
-                f"I couldn't understand the audio. Please try again about {professor.topic}."
-            )
-        elif not await llm.is_in_scope(transcript, professor.topic):
-            response_text = (
-                f"Por favor realiza preguntas relacionadas con {professor.topic}. "
-                f"Solo puedo ayudarte con ese tema. / "
-                f"Please ask questions related to {professor.topic}. "
-                f"I can only help with that subject."
-            )
-        else:
-            context_chunks = await rag.retrieve_context(transcript, professor.collection)
-
-            # Fire-and-forget notification when scope passes but threshold filters all chunks
-            if not context_chunks:
-                log.warning(
-                    "RAG threshold filter eliminated all chunks for professor %s — query: %s",
-                    professor.id,
-                    transcript,
+            # 3. Scope check + RAG + LLM
+            if not transcript.strip():
+                response_text = (
+                    f"No pude entender tu audio. Intenta nuevamente sobre {professor.topic}. / "
+                    f"I couldn't understand the audio. Please try again about {professor.topic}."
                 )
-                db.add(ThresholdNotification(
-                    professor_id=professor.id,
+            elif not await llm.is_in_scope(transcript, professor.topic, trace=trace):
+                response_text = (
+                    f"Por favor realiza preguntas relacionadas con {professor.topic}. "
+                    f"Solo puedo ayudarte con ese tema. / "
+                    f"Please ask questions related to {professor.topic}. "
+                    f"I can only help with that subject."
+                )
+            else:
+                async with langfuse_helpers.create_span(trace, "rag_retrieve") as span:
+                    context_chunks = await rag.retrieve_context(
+                        transcript,
+                        professor.collection,
+                        trace_id=getattr(trace, "id", None),
+                        trace=trace,
+                    )
+                    if span is not None:
+                        span.update(
+                            input={"query": transcript, "collection": professor.collection},
+                            output={"chunk_count": len(context_chunks)},
+                        )
+
+                # Fire-and-forget notification when scope passes but threshold filters all chunks
+                if not context_chunks:
+                    log.warning(
+                        "RAG threshold filter eliminated all chunks for professor %s — query: %s",
+                        professor.id,
+                        transcript,
+                    )
+                    db.add(ThresholdNotification(
+                        professor_id=professor.id,
+                        query=transcript,
+                    ))
+                    await db.commit()
+
+                response_text = await llm.generate_response(
+                    system_prompt=professor.system_prompt,
+                    history=history,
+                    context_chunks=context_chunks,
                     query=transcript,
-                ))
-                await db.commit()
+                    trace=trace,
+                )
 
-            response_text = await llm.generate_response(
-                system_prompt=professor.system_prompt,
-                history=history,
-                context_chunks=context_chunks,
-                query=transcript,
-            )
+            # 4. TTS
+            try:
+                async with langfuse_helpers.create_span(trace, "tts_synthesize") as span:
+                    audio_response = await tts.synthesize(response_text)
+                    if span is not None:
+                        span.update(
+                            input={"text_length": len(response_text)},
+                            output={"audio_bytes": len(audio_response)},
+                        )
+            except httpx.HTTPStatusError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Text-to-speech service error on {exc.request.url}: {exc.response.text}",
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"Text-to-speech processing failed: {type(exc).__name__}: {exc!r}")
 
-        # 4. TTS
-        try:
-            audio_response = await tts.synthesize(response_text)
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Text-to-speech service error on {exc.request.url}: {exc.response.text}",
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Text-to-speech processing failed: {type(exc).__name__}: {exc!r}")
+            # 5. Persist messages
+            db.add(Message(session_id=session_id, role=MessageRole.student, content=transcript))
+            db.add(Message(session_id=session_id, role=MessageRole.professor, content=response_text))
+            await db.commit()
 
-        # 5. Persist messages
-        db.add(Message(session_id=session_id, role=MessageRole.student, content=transcript))
-        db.add(Message(session_id=session_id, role=MessageRole.professor, content=response_text))
-        await db.commit()
+            # 6. Update Redis memory
+            await memory.append_message(str(session_id), "user", transcript)
+            await memory.append_message(str(session_id), "assistant", response_text)
 
-        # 6. Update Redis memory
-        await memory.append_message(str(session_id), "user", transcript)
-        await memory.append_message(str(session_id), "assistant", response_text)
-
-        return Response(content=audio_response, media_type="audio/wav")
+            return Response(content=audio_response, media_type="audio/wav")
+        finally:
+            if trace is not None:
+                trace.end()
 
     except HTTPException:
         raise

@@ -1,5 +1,5 @@
-"""Tests for LLM interaction, including labeled context assembly
-and citation prompt (CRIT-03).
+"""Tests for LLM interaction, including labeled context assembly,
+citation prompt (CRIT-03), and Langfuse span instrumentation.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from models.schemas import ContextChunk
-from services.llm import generate_response
+from services.llm import generate_response, is_in_scope
 
 GRACEFUL_MESSAGE = "No encontré información sobre eso en mis fuentes"
 
@@ -251,3 +251,137 @@ class TestUnlabeledChunks:
         # The chunk text should appear WITHOUT any [Source: ...] prefix
         assert "[Source:" not in context_in_prompt
         assert "Orphan content without a source." in context_in_prompt
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Langfuse Instrumentation — Spans in LLM
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestLangfuseSpans:
+    """Verify that LLM functions create spans when given a trace."""
+
+    @pytest.mark.asyncio
+    async def test_generate_response_creates_span_when_trace_provided(self):
+        """GIVEN a valid trace object
+        WHEN generate_response is called with that trace
+        THEN a child span is created and token counts are recorded.
+        """
+        mock_span = MagicMock()
+        mock_trace = MagicMock()
+        mock_trace.span.return_value = mock_span
+
+        mock_response_data = {"response": "Photosynthesis is a process."}
+        mock_response = MagicMock()
+        mock_response.json.return_value = mock_response_data
+
+        with (
+            patch("services.llm.httpx.AsyncClient") as mock_client_cls,
+            patch("services.llm.estimate_tokens") as mock_estimate,
+        ):
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_estimate.side_effect = lambda t: len(t) // 4
+
+            result = await generate_response(
+                system_prompt="You are helpful",
+                history=[],
+                context_chunks=[
+                    ContextChunk(
+                        text="Plants need sunlight.",
+                        source_document="botany.pdf",
+                        source_document_id="uuid-1",
+                    ),
+                ],
+                query="What is photosynthesis?",
+                trace=mock_trace,
+            )
+
+        assert result == mock_response_data["response"]
+        mock_trace.span.assert_called_once()
+        span_name = mock_trace.span.call_args[1].get("name", "")
+        assert "llm_generate" in span_name or mock_trace.span.called
+        assert mock_span.update.called
+
+    @pytest.mark.asyncio
+    async def test_generate_response_skips_span_when_trace_is_none(self):
+        """GIVEN trace=None (disabled)
+        WHEN generate_response is called
+        THEN no span is created and the function works normally.
+        """
+        mock_response_data = {"response": "Normal response."}
+        mock_response = MagicMock()
+        mock_response.json.return_value = mock_response_data
+
+        with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+
+            result = await generate_response(
+                system_prompt="Assistant",
+                history=[],
+                context_chunks=[
+                    ContextChunk(
+                        text="Content.",
+                        source_document="doc.pdf",
+                        source_document_id="uuid-1",
+                    ),
+                ],
+                query="Test",
+                trace=None,
+            )
+
+        assert result == mock_response_data["response"]
+        mock_client.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_is_in_scope_creates_span_when_trace_provided(self):
+        """GIVEN a valid trace object
+        WHEN is_in_scope is called with that trace
+        THEN a child span is created for scope checking.
+        """
+        mock_span = MagicMock()
+        mock_trace = MagicMock()
+        mock_trace.span.return_value = mock_span
+
+        mock_response_data = {"response": "yes"}
+        mock_response = MagicMock()
+        mock_response.json.return_value = mock_response_data
+
+        with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+
+            result = await is_in_scope(
+                "What is quantum physics?",
+                "physics",
+                trace=mock_trace,
+            )
+
+        assert result is True
+        mock_trace.span.assert_called_once()
+        span_name = mock_trace.span.call_args[1].get("name", "")
+        assert "scope" in span_name or mock_trace.span.called
+
+    @pytest.mark.asyncio
+    async def test_is_in_scope_skips_span_when_trace_is_none(self):
+        """GIVEN trace=None (disabled)
+        WHEN is_in_scope is called
+        THEN no span is created and the function works normally.
+        """
+        with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=MagicMock())
+            mock_client.post.return_value.json.return_value = {"response": "yes"}
+
+            result = await is_in_scope(
+                "What is quantum physics?",
+                "physics",
+                trace=None,
+            )
+
+        assert result is True

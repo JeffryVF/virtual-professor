@@ -54,7 +54,7 @@ async def _ensure_connected() -> Redis:
 
 # ── Token estimation ────────────────────────────────────────────────────────
 
-def _estimate_tokens(text: str) -> int:
+def estimate_tokens(text: str) -> int:
     """Estimate the number of tokens in a text string.
 
     Uses tiktoken (cl100k_base) if available — not exact for llama3.2 but
@@ -76,7 +76,7 @@ def _compress_messages(history: list[dict], max_tokens: int) -> int:
 
     removed = 0
     while len(history) > 1:
-        total = sum(_estimate_tokens(m.get("content", "")) for m in history)
+        total = sum(estimate_tokens(m.get("content", "")) for m in history)
         if total <= max_tokens:
             break
         history.pop(0)
@@ -84,6 +84,9 @@ def _compress_messages(history: list[dict], max_tokens: int) -> int:
 
     return removed
 
+
+# ── Backward-compat alias ───────────────────────────────────────────────────
+_estimate_tokens = estimate_tokens
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
