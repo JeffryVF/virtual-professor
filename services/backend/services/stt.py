@@ -11,11 +11,24 @@ from core.config import settings
 log = logging.getLogger(__name__)
 
 _FFMPEG_TIMEOUT = 60
+_MIN_AUDIO_BYTES = 44  # absolute minimum for a valid WAV header
+
+
+class AudioConversionError(ValueError):
+    """Raised when ffmpeg cannot process the raw audio blob."""
 
 
 def _convert_to_wav(audio_bytes: bytes) -> bytes:
+    if not audio_bytes or len(audio_bytes) < _MIN_AUDIO_BYTES:
+        raise AudioConversionError(
+            f"Audio blob too small ({len(audio_bytes)} bytes) — "
+            "the recording may be empty or the microphone was not detected."
+        )
+
     with tempfile.TemporaryDirectory() as temp_dir:
-        input_path = os.path.join(temp_dir, "input.webm")
+        # Don't use an extension — let ffmpeg auto-detect format from magic bytes.
+        # Safari records audio/mp4 (AAC), Chrome/Firefox use audio/webm (Opus).
+        input_path = os.path.join(temp_dir, "input")
         output_path = os.path.join(temp_dir, "output.wav")
 
         with open(input_path, "wb") as input_file:
@@ -40,6 +53,15 @@ def _convert_to_wav(audio_bytes: bytes) -> bytes:
             )
         except FileNotFoundError as exc:
             raise RuntimeError("ffmpeg not found") from exc
+        except subprocess.CalledProcessError as exc:
+            raise AudioConversionError(
+                f"ffmpeg failed (exit {exc.returncode}): "
+                f"{exc.stderr.decode(errors='replace')[:200]}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise AudioConversionError(
+                f"ffmpeg timed out after {_FFMPEG_TIMEOUT}s"
+            ) from exc
 
         with open(output_path, "rb") as output_file:
             return output_file.read()

@@ -117,6 +117,56 @@ async def generate_response(
     return output_text
 
 
+# Stop words used when extracting topic keywords for the fast-path check.
+_STOP_WORDS = frozenset({
+    "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "de", "del", "en", "por", "para", "con", "sin", "sobre",
+    "a", "al", "e", "y", "o", "u", "lo", "como",
+    "the", "a", "an", "of", "in", "to", "for", "with", "on", "at",
+    "introducción", "introduction", "intro", "i",
+})
+
+
+# Domain-specific keyword expansions: when a topic keyword is detected, related
+# technical terms are also accepted without needing the LLM fallback.
+_DOMAIN_KEYWORDS: dict[str, frozenset[str]] = {
+    # Programming / Computer Science
+    "programación": frozenset({
+        "algoritmo", "algoritmos", "variable", "variables", "función", "funciones",
+        "bucle", "bucles", "loop", "loops", "código", "codigo", "software",
+        "dato", "datos", "array", "arrays", "lista", "listas", "objeto", "objetos",
+        "clase", "clases", "método", "metodo", "métodos", "metodos",
+        "python", "java", "javascript", "html", "css", "compilador", "intérprete",
+        "debug", "depuración", "depuracion", "sintaxis", "string", "entero",
+        "booleano", "condición", "condicion", "condicional", "iteración", "iteracion",
+        "recursión", "recursion", "recursivo", "puntero", "punteros", "memoria",
+        "archivo", "archivos", "fichero", "ficheros", "entrada", "salida",
+        "parámetro", "parametro", "parámetros", "parametros", "argumento", "argumentos",
+        "retorno", "return", "if", "else", "while", "for",
+        "programar", "programando", "programador",
+    }),
+}
+
+
+def _topic_keywords(topic: str) -> list[str]:
+    """Extract meaningful keywords from a topic string (e.g., 'Programación' from 'Introducción a la Programación')."""
+    words = topic.lower().split()
+    return [w for w in words if w not in _STOP_WORDS and len(w) > 2]
+
+
+def _domain_related(query_lower: str, topic_lower: str) -> bool:
+    """Check if the query contains related technical terms for the topic's domain."""
+    for topic_word in topic_lower.split():
+        if topic_word in _DOMAIN_KEYWORDS:
+            # Query may be in-scope even without exact topic keyword if it contains
+            # a related technical term
+            related = _DOMAIN_KEYWORDS[topic_word]
+            query_words = set(query_lower.split())
+            if query_words & related:
+                return True
+    return False
+
+
 async def is_in_scope(query: str, topic: str, trace: "LangfuseTrace | None" = None) -> bool:
     """Check whether the student's query is related to the professor's topic.
 
@@ -126,30 +176,65 @@ async def is_in_scope(query: str, topic: str, trace: "LangfuseTrace | None" = No
     When ``trace`` is provided (Langfuse enabled), a child span is created
     for the scope check step.
     """
+    query_lower = query.lower()
+    topic_lower = topic.lower()
+
+    # Fast path 1: exact topic match
+    if topic_lower in query_lower:
+        return True
+
+    # Fast path 2: individual topic keywords (e.g., "programación" from "Introducción a la Programación")
+    for kw in _topic_keywords(topic):
+        if kw in query_lower:
+            return True
+
+    # Fast path 3: domain-related terms (e.g., "algoritmo" when topic is programming)
+    if _domain_related(query_lower, topic_lower):
+        return True
+
+    # LLM fallback for ambiguous queries
+    result = await _llm_check_scope(query, topic)
+
     if trace is not None:
         from services.langfuse import create_span
 
         async with create_span(trace, "scope_check") as span:
-            result = _check_scope(query, topic)
             if span is not None:
                 span.update(
-                    input={"query": query, "topic": topic},
+                    input={"query": query, "topic": topic, "method": "llm"},
                     output={"in_scope": result},
                 )
-            return result
 
-    return _check_scope(query, topic)
-
-
-def _check_scope(query: str, topic: str) -> bool:
-    """Internal scope check logic (keyword fast-path + LLM fallback)."""
-    if topic.lower() in query.lower():
-        return True
-    # The LLM fallback is async; this is the keyword-only fast path.
-    # The full LLM-based check is in the async function below.
-    return _keyword_in_scope(query, topic)
+    return result
 
 
-def _keyword_in_scope(query: str, topic: str) -> bool:
-    """Fast-path keyword check — returns True if topic appears in query."""
-    return topic.lower() in query.lower()
+async def _llm_check_scope(query: str, topic: str) -> bool:
+    """Ask the LLM whether the student's query falls within the professor's topic."""
+    keywords = _topic_keywords(topic)
+    topic_short = keywords[0].capitalize() if keywords else topic
+
+    system_prompt = (
+        "You are a classifier. Determine if the student's question is about "
+        "the professor's topic. Answer YES or NO only."
+    )
+    prompt = (
+        f"Topic: {topic_short}\n"
+        f"Student: {query}\n"
+        f"Is this about {topic_short}? YES or NO:"
+    )
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            f"{settings.ollama_url}/api/generate",
+            json={
+                "model": settings.ollama_llm_model,
+                "system": system_prompt,
+                "prompt": prompt,
+                "stream": False,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        answer = data["response"].strip().upper()
+        log.info("Scope LLM check for %r on %r → %s", query[:80], topic, answer)
+        return answer.startswith("YES")

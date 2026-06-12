@@ -86,7 +86,13 @@ export default function ProfessorForm({ professor, onSaved }: Props) {
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="avatar_id">Avatar ID</Label>
-              <Input id="avatar_id" value={form.avatar_id} onChange={e => set('avatar_id', e.target.value)} placeholder="LiveAvatar UUID" required />
+              <Input
+                id="avatar_id"
+                value={form.avatar_id}
+                onChange={e => set('avatar_id', e.target.value)}
+                placeholder="e.g. dd73ea75-1218-4ef3-92ce-606d5f7fbc0a"
+                required
+              />
             </div>
           </div>
           <div className="space-y-1.5">

@@ -26,10 +26,6 @@ services:
     ports:
       - "9000:9000"
 
-  ollama:
-    ports:
-      - "11434:11434"
-
   qdrant:
     ports:
       - "6333:6333"

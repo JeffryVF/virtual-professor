@@ -41,8 +41,6 @@ services:
         condition: service_started
       whisper:
         condition: service_started
-      ollama:
-        condition: service_started
       kokoro:
         condition: service_started
     networks:
@@ -63,20 +61,6 @@ services:
     networks:
       - app-network
     restart: always
-
-  ollama:
-    image: ollama/ollama
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - app-network
-    restart: always
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
 
   qdrant:
     image: qdrant/qdrant
@@ -152,11 +136,11 @@ services:
       REDIS_URL: redis://langfuse-redis:6379
       LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-changeme-secret-key}
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: http://localhost:3001
       SALT: ${LANGFUSE_SALT:-changeme-salt}
       ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
     ports:
-      - "3000:3000"
+      - "3001:3000"
     networks:
       - app-network
     restart: always
@@ -167,7 +151,6 @@ networks:
 
 volumes:
   postgres_data:
-  ollama_data:
   qdrant_data:
   kokoro_models:
   uploads_data:

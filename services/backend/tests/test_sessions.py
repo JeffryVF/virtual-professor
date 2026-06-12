@@ -354,3 +354,29 @@ async def test_speak_aborts_pipeline_when_stt_fails_with_langfuse_enabled(
     mock_llm_module.generate_response.assert_not_called()
     mock_tts.synthesize.assert_not_called()
     mock_trace.end.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_liveavatar_connect_rejects_non_uuid_avatar_id(async_client, test_professor):
+    """GIVEN a professor with a placeholder avatar_id
+    WHEN LiveAvatar connect is requested
+    THEN the API returns 422 before calling the external LiveAvatar service.
+    """
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "Avatar Student", "email": "avatar@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    response = await async_client.post(f"/sessions/{session_id}/liveavatar-connect")
+
+    assert response.status_code == 422
+    assert "valid UUID" in response.json()["detail"]

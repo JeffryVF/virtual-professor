@@ -178,7 +178,8 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
   function stopRecording() {
     return new Promise<Blob>((resolve) => {
       const recorder = recorderRef.current!
-      recorder.onstop = () => resolve(new Blob(chunksRef.current, { type: 'audio/webm' }))
+      const mimeType = recorder.mimeType || 'audio/webm'
+      recorder.onstop = () => resolve(new Blob(chunksRef.current, { type: mimeType }))
       recorder.stop()
       recorder.stream.getTracks().forEach(t => t.stop())
     })
@@ -194,6 +195,11 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
     setProcessing(true)
     try {
       const audioBlob = await stopRecording()
+      if (audioBlob.size < 1024) {
+        toast.error('Recording too short — please hold the mic button a bit longer.')
+        setProcessing(false)
+        return
+      }
       const wavBuffer = await speakInSession(sessionId, audioBlob)
 
       const msgs = await getSessionHistory(sessionId)

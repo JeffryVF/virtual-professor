@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
-from models.db import Message, MessageRole, Professor, Student, ThresholdNotification
+from models.db import Language, Message, MessageRole, Professor, Student, ThresholdNotification
 from models.db import Session as DBSession
 from models.schemas import (
     MessageResponse,
@@ -25,6 +25,20 @@ from services.liveavatar import create_session_token, start_session
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Whisper expects standard language codes; map our enum values accordingly.
+_STT_LANGUAGE_MAP = {
+    "es": "es",
+    "en": "en",
+    "both": "es",  # default to Spanish when both are configured
+}
+
+
+def _map_stt_language(lang) -> str | None:
+    """Map a Professor.language value to a whisper language code, or None for auto-detect."""
+    if isinstance(lang, Language):
+        return _STT_LANGUAGE_MAP.get(lang.value)
+    return _STT_LANGUAGE_MAP.get(lang)
 
 
 # ── Students ──────────────────────────────────────────────────────────────────
@@ -89,7 +103,10 @@ async def speak(
             audio_bytes = await audio.read()
             async with langfuse_helpers.create_span(trace, "stt_transcribe") as span:
                 try:
-                    transcript = await stt.transcribe(audio_bytes)
+                    whisper_lang = _map_stt_language(professor.language)
+                    log.info("STT input: %d bytes, language=%s", len(audio_bytes), whisper_lang)
+                    transcript = await stt.transcribe(audio_bytes, language=whisper_lang)
+                    log.info("STT result: %r (empty=%s)", transcript.strip()[:100], not transcript.strip())
                     if span is not None:
                         span.update(
                             input={"audio_bytes": len(audio_bytes)},
@@ -212,7 +229,10 @@ async def liveavatar_connect(session_id: UUID, db: AsyncSession = Depends(get_db
         prof_result = await db.execute(select(Professor).where(Professor.id == session.professor_id))
         professor = prof_result.scalar_one()
 
-        token_data = await create_session_token(professor.avatar_id)
+        try:
+            token_data = await create_session_token(professor.avatar_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         session_data = await start_session(token_data["session_token"])
 
         return {

@@ -1,4 +1,5 @@
 import logging
+from uuid import UUID
 
 import httpx
 
@@ -7,11 +8,27 @@ from core.config import settings
 log = logging.getLogger(__name__)
 
 
+def _normalize_avatar_id(avatar_id: str) -> str:
+    """Validate that LiveAvatar receives a UUID-shaped avatar ID.
+
+    LiveAvatar rejects placeholders such as "avatar-1" or "<avatar_id>".
+    We validate locally so callers get a clear 422 before hitting the API.
+    """
+    try:
+        return str(UUID(avatar_id))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "avatar_id must be a valid UUID from LiveAvatar (for example, a public avatar ID)."
+        ) from exc
+
+
 async def create_session_token(avatar_id: str) -> dict:
     """
     POST /v1/sessions/token (LITE mode).
     Returns {"session_id": ..., "session_token": ...}
     """
+    avatar_id = _normalize_avatar_id(avatar_id)
+
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
             f"{settings.liveavatar_api_url}/v1/sessions/token",
@@ -44,6 +61,8 @@ async def start_session(session_token: str) -> dict:
 
 async def create_embed_session(avatar_id: str) -> dict:
     """Legacy embed helper (kept for reference)."""
+    avatar_id = _normalize_avatar_id(avatar_id)
+
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
             f"{settings.liveavatar_api_url}/v2/embeddings",

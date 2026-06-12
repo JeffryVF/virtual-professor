@@ -151,7 +151,7 @@ export const endSession = (sessionId: string) =>
 
 export async function speakInSession(sessionId: string, audio: Blob): Promise<ArrayBuffer> {
   const form = new FormData()
-  form.append('audio', audio, 'recording.webm')
+  form.append('audio', audio, 'recording')
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/speak`, {
     method: 'POST',
     body: form,
