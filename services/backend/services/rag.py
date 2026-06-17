@@ -49,7 +49,7 @@ def filter_nodes_by_score(nodes: list[NodeWithScore], min_score: float) -> list[
     Returns only nodes where ``node.score >= min_score``.
     Returns empty list if no nodes pass the threshold.
     """
-    return [node for node in nodes if node.score >= min_score]
+    return [node for node in nodes if node.score is not None and node.score >= min_score]
 
 
 async def retrieve_context(
@@ -154,6 +154,7 @@ async def retrieve_context(
             source_document_id=node.metadata.get("document_id", ""),
             source_page=node.metadata.get("page_label", None),
             trace_id=trace_id,
+            score=node.score,
         )
         for node in filtered
     ]

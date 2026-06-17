@@ -137,3 +137,77 @@ async def admin_token(async_client, admin_user):
     )
     assert response.status_code == 200
     return response.json()["access_token"]
+
+
+# ── Header dict fixtures (convenience for tests that need full headers) ──────
+
+
+@pytest_asyncio.fixture
+async def auth_headers(student_token: str) -> dict[str, str]:
+    """Return Authorization headers for a student user."""
+    return {"Authorization": f"Bearer {student_token}"}
+
+
+@pytest_asyncio.fixture
+async def admin_headers(admin_token: str) -> dict[str, str]:
+    """Return Authorization headers for an admin user."""
+    return {"Authorization": f"Bearer {admin_token}"}
+
+
+# ── Professor & Document fixtures (via admin API) ────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def test_professor(async_client, admin_headers) -> dict:
+    """Create a professor via the admin API and return its data.
+
+    Uses the POST /admin/professors endpoint so the fixture exercises the
+    real API path. Tests that need DB-level fixtures can still define their
+    own module-level fixtures.
+
+    Returns the full ProfessorResponse dict including ``id``, ``name``,
+    ``collection``, etc.
+    """
+    from unittest.mock import patch
+
+    # Mock Qdrant calls that might be triggered by professor creation
+    # (professor CRUD itself doesn't touch Qdrant, but some side effects might)
+    with patch("routers.admin.AsyncQdrantClient"):
+        response = await async_client.post(
+            "/admin/professors",
+            json={
+                "name": "API Test Professor",
+                "topic": "science",
+                "language": "es",
+                "avatar_id": "test-avatar",
+                "system_prompt": "You are a science professor.",
+            },
+            headers=admin_headers,
+        )
+    assert response.status_code == 201, f"Professor creation failed: {response.text}"
+    return response.json()
+
+
+@pytest_asyncio.fixture
+async def test_document(async_client, admin_headers, test_professor) -> dict:
+    """Upload a test document via the admin API and return its data.
+
+    Creates a professor first (via ``test_professor``), then uploads a small
+    PDF file. The background ingestion task is mocked to avoid side effects.
+
+    Returns the full DocumentResponse dict including ``id``, ``status``,
+    ``filename``, etc.
+    """
+    from unittest.mock import patch
+
+    with (
+        patch("routers.admin.ingest_document"),
+        patch("routers.admin.AsyncQdrantClient"),
+    ):
+        response = await async_client.post(
+            f"/admin/professors/{test_professor['id']}/documents",
+            files={"file": ("test.pdf", b"%PDF-1.4 test content", "application/pdf")},
+            headers=admin_headers,
+        )
+    assert response.status_code == 201, f"Document upload failed: {response.text}"
+    return response.json()

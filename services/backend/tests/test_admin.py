@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
+from uuid import UUID
+
 from models.db import Document, DocumentStatus, Language, Professor
 
 
@@ -668,3 +670,201 @@ class TestAdminAuthGuards:
             headers={"Authorization": f"Bearer {student_token}"},
         )
         assert response.status_code == 403
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Professor CRUD
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestProfessorCrud:
+    """Integration tests for professor CRUD via admin API."""
+
+    PROFESSOR_DATA = {
+        "name": "CRUD Test Professor",
+        "topic": "mathematics",
+        "language": "en",
+        "avatar_id": "crud-avatar",
+        "system_prompt": "You are a math professor.",
+    }
+
+    @pytest.mark.asyncio
+    async def test_create_professor(self, async_client, admin_headers):
+        """GIVEN valid professor data
+        WHEN POST /admin/professors
+        THEN 201 with the professor data including auto-generated fields.
+        """
+        response = await async_client.post(
+            "/admin/professors",
+            json=self.PROFESSOR_DATA,
+            headers=admin_headers,
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["name"] == self.PROFESSOR_DATA["name"]
+        assert body["topic"] == self.PROFESSOR_DATA["topic"]
+        assert body["language"] == self.PROFESSOR_DATA["language"]
+        assert body["collection"].startswith("prof_")
+        assert "id" in body
+        assert "created_at" in body
+
+    @pytest.mark.asyncio
+    async def test_create_professor_no_auth(self, async_client):
+        """GIVEN no Authorization header
+        WHEN POST /admin/professors
+        THEN 403 is returned.
+        """
+        response = await async_client.post(
+            "/admin/professors",
+            json=self.PROFESSOR_DATA,
+        )
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_create_professor_as_student(self, async_client, auth_headers):
+        """GIVEN a student token (not admin)
+        WHEN POST /admin/professors
+        THEN 403 is returned.
+        """
+        response = await async_client.post(
+            "/admin/professors",
+            json=self.PROFESSOR_DATA,
+            headers=auth_headers,
+        )
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_list_professors(self, async_client, admin_headers, test_professor):
+        """GIVEN at least one professor exists
+        WHEN GET /admin/professors
+        THEN 200 with a non-empty list.
+        """
+        response = await async_client.get(
+            "/admin/professors",
+            headers=admin_headers,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert isinstance(body, list)
+        assert len(body) >= 1
+        ids = [p["id"] for p in body]
+        prof_id = str(test_professor.id) if hasattr(test_professor, "id") else test_professor["id"]
+        assert prof_id in ids
+
+    @pytest.mark.asyncio
+    async def test_get_nonexistent_professor(self, async_client, admin_headers):
+        """GIVEN a non-existent professor_id
+        WHEN GET /admin/professors/{professor_id}
+        THEN 404 is returned.
+        """
+        response = await async_client.get(
+            "/admin/professors/00000000-0000-0000-0000-000000000000",
+            headers=admin_headers,
+        )
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_update_professor(self, async_client, admin_headers, test_professor):
+        """GIVEN an existing professor
+        WHEN PATCH /admin/professors/{professor_id} with updated fields
+        THEN 200 with the updated professor data.
+        """
+        prof_id = str(test_professor.id) if hasattr(test_professor, "id") else test_professor["id"]
+        response = await async_client.patch(
+            f"/admin/professors/{prof_id}",
+            json={"name": "Updated Name", "topic": "physics"},
+            headers=admin_headers,
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["name"] == "Updated Name"
+        assert body["topic"] == "physics"
+        # Unchanged fields should remain
+        expected_lang = (test_professor.language.value if hasattr(test_professor, "language")
+                         else test_professor["language"])
+        assert body["language"] == expected_lang
+
+    @pytest.mark.asyncio
+    async def test_update_nonexistent_professor(self, async_client, admin_headers):
+        """GIVEN a non-existent professor_id
+        WHEN PATCH /admin/professors/{professor_id}
+        THEN 404 is returned.
+        """
+        response = await async_client.patch(
+            "/admin/professors/00000000-0000-0000-0000-000000000000",
+            json={"name": "Nope"},
+            headers=admin_headers,
+        )
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_professor(self, async_client, admin_headers):
+        """GIVEN an existing professor
+        WHEN DELETE /admin/professors/{professor_id}
+        THEN 204 is returned and the professor is no longer fetchable.
+        """
+        import uuid
+
+        with patch("routers.admin.delete_qdrant_collection"):
+            # Create a fresh professor to delete (cannot rely on injected test_professor)
+            create_resp = await async_client.post(
+                "/admin/professors",
+                json=self.PROFESSOR_DATA,
+                headers=admin_headers,
+            )
+            assert create_resp.status_code == 201
+            fresh_prof_id = create_resp.json()["id"]
+
+            # Delete it
+            delete_resp = await async_client.delete(
+                f"/admin/professors/{fresh_prof_id}",
+                headers=admin_headers,
+            )
+            assert delete_resp.status_code == 204
+
+            # Verify it's gone
+            get_resp = await async_client.get(
+                f"/admin/professors/{fresh_prof_id}",
+                headers=admin_headers,
+            )
+            assert get_resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_nonexistent_professor(self, async_client, admin_headers):
+        """GIVEN a non-existent professor_id
+        WHEN DELETE /admin/professors/{professor_id}
+        THEN 404 is returned.
+        """
+        response = await async_client.delete(
+            "/admin/professors/00000000-0000-0000-0000-000000000000",
+            headers=admin_headers,
+        )
+        assert response.status_code == 404
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Document upload edge cases
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDocumentUploadEdgeCases:
+    """Tests for document upload validation via admin API."""
+
+    @pytest.mark.asyncio
+    async def test_upload_invalid_format_exe(
+        self, async_client, admin_headers, test_professor
+    ):
+        """GIVEN an .exe file (disallowed extension)
+        WHEN POST /admin/professors/{professor_id}/documents
+        THEN 400 with EXTENSION_NOT_ALLOWED error code.
+        """
+        prof_id = str(test_professor.id) if hasattr(test_professor, "id") else test_professor["id"]
+        response = await async_client.post(
+            f"/admin/professors/{prof_id}/documents",
+            files={"file": ("virus.exe", b"MZ\x90\x00fake exe", "application/octet-stream")},
+            headers=admin_headers,
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"]["code"] == "EXTENSION_NOT_ALLOWED"

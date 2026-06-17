@@ -122,6 +122,49 @@ class TestFilterNodesByScore:
         result = filter_nodes_by_score(nodes, 0.75)
         assert result == []
 
+    def test_negative_threshold_passes_all(self):
+        """GIVEN negative threshold score
+        WHEN filter applied THEN all nodes pass (all scores >= negative).
+        """
+        nodes = [
+            _make_node("low", 0.05),
+            _make_node("medium", 0.50),
+            _make_node("high", 0.99),
+        ]
+        result = filter_nodes_by_score(nodes, -1.0)
+        assert len(result) == 3
+
+    def test_threshold_one_point_zero_only_perfect(self):
+        """GIVEN threshold 1.0 (perfect score only)
+        WHEN filter applied THEN only score == 1.0 passes.
+        """
+        nodes = [
+            _make_node("near perfect", 0.99),
+            _make_node("perfect", 1.0),
+            _make_node("above perfect", 1.5),  # theoretical edge case
+        ]
+        result = filter_nodes_by_score(nodes, 1.0)
+        assert len(result) == 2  # 1.0 and 1.5 both pass
+        assert all(n.score >= 1.0 for n in result)
+
+    def test_single_node_at_threshold_included(self):
+        """GIVEN a single node exactly at threshold
+        WHEN filter applied THEN it is included.
+        """
+        nodes = [_make_node("only one", 0.5)]
+        result = filter_nodes_by_score(nodes, 0.5)
+        assert len(result) == 1
+
+    def test_none_scores_handled_as_low(self):
+        """GIVEN a node with score=None
+        WHEN filter applied THEN None < any float so it is excluded.
+        """
+        from llama_index.core.schema import NodeWithScore, TextNode
+
+        none_node = NodeWithScore(node=TextNode(text="no score"), score=None)
+        result = filter_nodes_by_score([none_node], 0.0)
+        assert result == []
+
 
 # ── Integration test (settings-aware) ──────────────────────────────────────
 
@@ -985,3 +1028,147 @@ class TestFallbackChain:
 
         assert len(result) == 1
         assert result[0].source_document == ""
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Empty query handling
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestEmptyQueryHandling:
+    """Tests for retrieve_context with empty or edge-case queries."""
+
+    _qdrant_patches = (
+        "services.rag.AsyncQdrantClient",
+        "services.rag.QdrantVectorStore",
+        "services.rag.OllamaEmbedding",
+        "services.rag.VectorStoreIndex.from_vector_store",
+    )
+
+    @pytest.mark.asyncio
+    async def test_empty_query_returns_results(self):
+        """GIVEN an empty query string
+        WHEN retrieve_context is called
+        THEN it SHALL not crash and return results (empty query passes through).
+        """
+        nodes = [_make_node("some content", 0.9)]
+        mock_retriever = MagicMock(spec=AsyncMock)
+        mock_retriever.aretrieve = AsyncMock(return_value=nodes)
+
+        mock_index = MagicMock()
+        mock_index.as_retriever.return_value = mock_retriever
+
+        mock_collections = MagicMock()
+        mock_col = MagicMock()
+        mock_col.name = "test_collection"
+        mock_collections.collections = [mock_col]
+
+        with (
+            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
+            patch(self._qdrant_patches[1]),
+            patch(self._qdrant_patches[2]),
+            patch(self._qdrant_patches[3], return_value=mock_index),
+            patch.object(settings, "reranker_type", "none"),
+        ):
+            mock_client = MagicMock()
+            mock_client.get_collections = AsyncMock(
+                return_value=mock_collections
+            )
+            mock_qdrant_cls.return_value = mock_client
+
+            from services.rag import retrieve_context  # noqa: PLC0415
+
+            result = await retrieve_context(
+                query="",
+                professor_collection="test_collection",
+                top_k=40,
+            )
+
+        assert len(result) == 1
+        assert result[0].text == "some content"
+
+    @pytest.mark.asyncio
+    async def test_whitespace_query_returns_results(self):
+        """GIVEN a whitespace-only query string
+        WHEN retrieve_context is called
+        THEN it SHALL not crash (query is passed to the retriever as-is).
+        """
+        nodes = [_make_node("whitespace result", 0.85)]
+        mock_retriever = MagicMock(spec=AsyncMock)
+        mock_retriever.aretrieve = AsyncMock(return_value=nodes)
+
+        mock_index = MagicMock()
+        mock_index.as_retriever.return_value = mock_retriever
+
+        mock_collections = MagicMock()
+        mock_col = MagicMock()
+        mock_col.name = "test_collection"
+        mock_collections.collections = [mock_col]
+
+        with (
+            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
+            patch(self._qdrant_patches[1]),
+            patch(self._qdrant_patches[2]),
+            patch(self._qdrant_patches[3], return_value=mock_index),
+            patch.object(settings, "reranker_type", "none"),
+        ):
+            mock_client = MagicMock()
+            mock_client.get_collections = AsyncMock(
+                return_value=mock_collections
+            )
+            mock_qdrant_cls.return_value = mock_client
+
+            from services.rag import retrieve_context  # noqa: PLC0415
+
+            result = await retrieve_context(
+                query="   ",
+                professor_collection="test_collection",
+                top_k=40,
+            )
+
+        assert len(result) == 1
+        assert result[0].text == "whitespace result"
+
+    @pytest.mark.asyncio
+    async def test_very_long_query_does_not_crash(self):
+        """GIVEN a very long query string (>1000 chars)
+        WHEN retrieve_context is called
+        THEN it SHALL not crash.
+        """
+        long_query = "test " * 500  # ~2500 chars
+
+        nodes = [_make_node("long query handled", 0.9)]
+        mock_retriever = MagicMock(spec=AsyncMock)
+        mock_retriever.aretrieve = AsyncMock(return_value=nodes)
+
+        mock_index = MagicMock()
+        mock_index.as_retriever.return_value = mock_retriever
+
+        mock_collections = MagicMock()
+        mock_col = MagicMock()
+        mock_col.name = "test_collection"
+        mock_collections.collections = [mock_col]
+
+        with (
+            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
+            patch(self._qdrant_patches[1]),
+            patch(self._qdrant_patches[2]),
+            patch(self._qdrant_patches[3], return_value=mock_index),
+            patch.object(settings, "reranker_type", "none"),
+        ):
+            mock_client = MagicMock()
+            mock_client.get_collections = AsyncMock(
+                return_value=mock_collections
+            )
+            mock_qdrant_cls.return_value = mock_client
+
+            from services.rag import retrieve_context  # noqa: PLC0415
+
+            result = await retrieve_context(
+                query=long_query,
+                professor_collection="test_collection",
+                top_k=40,
+            )
+
+        assert len(result) == 1
+        assert result[0].text == "long query handled"

@@ -210,3 +210,150 @@ async def test_admin_as_admin(async_client, admin_token):
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 200
+
+
+# ── Registration edge cases ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_register_missing_fields(async_client):
+    """POST /auth/register with missing required fields returns 422."""
+    response = await async_client.post("/auth/register", json={})
+    assert response.status_code == 422
+
+    # Also test partial data
+    response = await async_client.post(
+        "/auth/register",
+        json={"email": "partial@test.com"},  # missing password and name
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_register_invalid_email(async_client):
+    """POST /auth/register with an invalid email format returns 422."""
+    response = await async_client.post(
+        "/auth/register",
+        json={"email": "not-an-email", "password": "securepass", "name": "No Email"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_register_long_password(async_client):
+    """POST /auth/register with password >128 chars returns 422.
+
+    GIVEN a password string longer than 128 characters
+    WHEN the register endpoint processes it
+    THEN the request SHALL be rejected with 422 (Pydantic validation).
+    """
+    long_pw = "a" * 129
+    response = await async_client.post(
+        "/auth/register",
+        json={"email": "longpw@test.com", "password": long_pw, "name": "Long PW"},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_register_race_condition(async_client):
+    """GIVEN two simultaneous register requests with the same email
+    WHEN both are sent concurrently
+    THEN exactly one succeeds (201) and the other gets 409.
+    """
+    import asyncio
+
+    async def _register():
+        return await async_client.post(
+            "/auth/register",
+            json={
+                "email": "race_condition@test.com",
+                "password": "securepass",
+                "name": "Race User",
+            },
+        )
+
+    responses = await asyncio.gather(_register(), _register())
+    statuses = [r.status_code for r in responses]
+
+    assert 201 in statuses, "At least one registration should succeed"
+    assert 409 in statuses, "The duplicate registration should be rejected"
+
+
+# ── Token edge cases ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_me_malformed_token(async_client):
+    """GET /auth/me with a malformed (invalid) JWT returns 401."""
+    response = await async_client.get(
+        "/auth/me",
+        headers={"Authorization": "Bearer this.is.not.a.valid.jwt"},
+    )
+    assert response.status_code == 401
+    assert "invalid" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_refresh_revoked_token_reuse_detection(async_client, student_user):
+    """POST /auth/refresh with a revoked token returns 401.
+
+    GIVEN a refresh token that has already been used (rotated)
+    WHEN the same refresh token is presented again
+    THEN the server detects reuse, revokes ALL tokens for that user,
+    AND returns 401 with 'revoked' in the detail.
+    """
+    # First login to get a refresh token
+    login_resp = await async_client.post(
+        "/auth/login",
+        json={"email": "student@test.com", "password": "testpassword"},
+    )
+    assert login_resp.status_code == 200
+    original_refresh = login_resp.json()["refresh_token"]
+
+    # Use the refresh token once (legitimate rotation — old token gets revoked)
+    first_use = await async_client.post(
+        "/auth/refresh",
+        json={"refresh_token": original_refresh},
+    )
+    assert first_use.status_code == 200
+
+    # Use the SAME (now revoked) refresh token again → reuse detection
+    second_use = await async_client.post(
+        "/auth/refresh",
+        json={"refresh_token": original_refresh},
+    )
+    assert second_use.status_code == 401
+    assert "revoked" in second_use.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_refresh_expired_token_in_db(async_client, db_session, student_user):
+    """POST /auth/refresh with a token that expired in the DB returns 401.
+
+    GIVEN a refresh token whose ``expires_at`` is in the past
+    WHEN the refresh endpoint processes it
+    THEN 401 is returned with 'expired' in the detail.
+    """
+    import time
+    from models.user import RefreshToken
+    from dependencies.auth import hash_token
+
+    # Create an expired refresh token directly in the DB
+    expired_raw = "expired-test-token"
+    expired_token = RefreshToken(
+        token_hash=hash_token(expired_raw),
+        user_id=student_user.id,
+        expires_at=__import__("datetime").datetime.fromtimestamp(
+            time.time() - 3600, tz=__import__("datetime").timezone.utc
+        ),
+    )
+    db_session.add(expired_token)
+    await db_session.commit()
+
+    response = await async_client.post(
+        "/auth/refresh",
+        json={"refresh_token": expired_raw},
+    )
+    assert response.status_code == 401
+    assert "expired" in response.json()["detail"].lower()

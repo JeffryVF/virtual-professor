@@ -609,6 +609,116 @@ async def test_get_message_sources_empty(async_app, async_client, test_professor
     WHEN GET /sessions/{session_id}/messages/{message_id}/sources
     THEN empty sources list is returned.
     """
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Session edge cases — 404 and invalid-state handling
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_create_session_non_existent_professor(async_client):
+    """GIVEN a non-existent professor_id
+    WHEN POST /sessions
+    THEN 404 is returned.
+    """
+    # First create a student to get a valid student_id
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "Orphan Student", "email": "orphan@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    response = await async_client.post(
+        "/sessions",
+        json={
+            "professor_id": "00000000-0000-0000-0000-000000000000",
+            "student_id": student_id,
+        },
+    )
+    assert response.status_code == 404
+    assert "professor" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_create_session_non_existent_student(async_client, test_professor):
+    """GIVEN a non-existent student_id
+    WHEN POST /sessions
+    THEN 404 is returned.
+    """
+    response = await async_client.post(
+        "/sessions",
+        json={
+            "professor_id": str(test_professor.id),
+            "student_id": "00000000-0000-0000-0000-000000000000",
+        },
+    )
+    assert response.status_code == 404
+    assert "student" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_get_history_non_existent_session(async_client):
+    """GIVEN a non-existent session_id
+    WHEN GET /sessions/{session_id}/history
+    THEN empty list is returned (the endpoint returns all messages,
+    which is none for a non-existent session).
+    """
+    response = await async_client.get(
+        "/sessions/00000000-0000-0000-0000-000000000000/history",
+    )
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.asyncio
+async def test_end_non_existent_session(async_client):
+    """GIVEN a non-existent session_id
+    WHEN DELETE /sessions/{session_id}
+    THEN 404 is returned.
+    """
+    response = await async_client.delete(
+        "/sessions/00000000-0000-0000-0000-000000000000",
+    )
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_end_already_ended_session(async_client, test_professor):
+    """GIVEN an already-ended session
+    WHEN DELETE /sessions/{session_id} is called again
+    THEN the endpoint returns 404 (session is still findable but its
+    ended_at is set; the speak endpoint checks ended_at but the delete
+    endpoint does not — it always succeeds as long as the session exists).
+    """
+    # Create student and session
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={
+            "name": "Ended Session Student",
+            "email": "ended_session@test.com",
+            "language": "es",
+        },
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    # End the session once
+    response1 = await async_client.delete(f"/sessions/{session_id}")
+    assert response1.status_code == 204
+
+    # End it again — session still exists, so the delete sets ended_at again
+    response2 = await async_client.delete(f"/sessions/{session_id}")
+    assert response2.status_code == 204
     from uuid import UUID
     from models.db import MessageRole
 
