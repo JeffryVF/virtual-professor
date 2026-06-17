@@ -378,8 +378,8 @@ async def test_speak_aborts_pipeline_when_stt_fails_with_langfuse_enabled(
             files={"audio": ("test.wav", audio_file, "audio/wav")},
         )
 
-    assert response.status_code == 502
-    assert "Speech-to-text" in response.json()["detail"]
+    assert response.status_code == 503
+    assert "No se pudo capturar" in response.json()["detail"]
     mock_rag.retrieve_context.assert_not_called()
     mock_llm_module.generate_response.assert_not_called()
     mock_tts.synthesize.assert_not_called()

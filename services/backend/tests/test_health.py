@@ -1,14 +1,36 @@
-"""Basic health-check and smoke tests for the Virtual Professor API."""
+"""Health-check and smoke tests for the Virtual Professor API.
+
+The health endpoint probes all backend services concurrently. In the test
+environment no external services are available, so every probe returns
+``unhealthy`` and the overall status is ``degraded``.
+"""
 
 import pytest
 
 
 @pytest.mark.asyncio
 async def test_health_endpoint(async_client):
-    """GET /health should return 200 with status ok."""
+    """GET /health should return 200 with the enhanced status payload."""
     response = await async_client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+
+    # The response shape is always the same regardless of which services are up
+    assert body["status"] in ("healthy", "degraded")
+    assert "timestamp" in body
+    assert body["version"] == "0.1.0"
+
+    services = body["services"]
+    assert set(services.keys()) == {"postgres", "redis", "qdrant", "ollama", "kokoro"}
+
+    for service_name, info in services.items():
+        assert info["status"] in ("healthy", "unhealthy")
+        if info["status"] == "healthy":
+            assert "latency_ms" in info
+            assert isinstance(info["latency_ms"], float)
+        else:
+            assert "error" in info
+            assert isinstance(info["error"], str)
 
 
 @pytest.mark.asyncio
@@ -21,10 +43,10 @@ async def test_professors_list_empty(async_client):
 
 @pytest.mark.asyncio
 async def test_health_response_time(async_client):
-    """Health endpoint should respond in under 100ms."""
+    """Health endpoint should respond in under 1s (5 concurrent failing probes)."""
     import time
 
     start = time.perf_counter()
     await async_client.get("/health")
     elapsed = (time.perf_counter() - start) * 1000
-    assert elapsed < 100, f"Health check took {elapsed:.1f}ms — expected <100ms"
+    assert elapsed < 1000, f"Health check took {elapsed:.1f}ms — expected <1000ms"

@@ -1,13 +1,14 @@
 'use client'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { GraduationCap, BookOpen, LayoutDashboard, FileText } from 'lucide-react'
+import { GraduationCap, BookOpen, LayoutDashboard, FileText, Activity } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const links = [
   { href: '/admin', label: 'Dashboard', icon: LayoutDashboard, exact: true },
   { href: '/admin/professors', label: 'Professors', icon: GraduationCap, exact: false },
   { href: '/admin/documents', label: 'Documentos', icon: FileText, exact: false },
+  { href: '/admin/status', label: 'Estado', icon: Activity, exact: false },
 ]
 
 export default function Sidebar() {

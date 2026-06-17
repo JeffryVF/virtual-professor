@@ -1,4 +1,6 @@
+import json
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -12,7 +14,7 @@ from core.database import engine
 from core.middleware import SecurityHeadersMiddleware
 from core.rate_limit import limiter
 from models.db import Base
-from routers import admin, auth, professors, sessions
+from routers import admin, auth, health, professors, sessions
 from services import langfuse as langfuse_service
 
 log = logging.getLogger(__name__)
@@ -21,11 +23,18 @@ log = logging.getLogger(__name__)
 def _configure_logging() -> None:
     """Set up logging: DEBUG in dev, WARNING in production."""
     level = logging.DEBUG if settings.debug else logging.WARNING
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        force=True,
-    )
+    if settings.debug:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            force=True,
+        )
+    else:
+        logging.basicConfig(
+            level=level,
+            format='{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","message":"%(message)s"}',
+            force=True,
+        )
 
 
 # ── Logging ────────────────────────────────────────────────────────────────
@@ -120,12 +129,43 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(SlowAPIMiddleware)
 
 # ── Routers ────────────────────────────────────────────────────────────────
+app.include_router(health.router)
 app.include_router(professors.router, prefix="/professors", tags=["professors"])
 app.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 
-@app.get("/health", tags=["health"])
-async def health():
-    return {"status": "ok"}
+# ── Request logging middleware ───────────────────────────────────────────────
+
+_access_log = logging.getLogger("access")
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log every HTTP request in structured JSON format."""
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed = (time.perf_counter() - start) * 1000
+
+    log_data = {
+        "method": request.method,
+        "path": request.url.path,
+        "status_code": response.status_code,
+        "duration_ms": round(elapsed, 2),
+        "ip": request.client.host if request.client else "",
+        "user_agent": request.headers.get("user-agent", ""),
+    }
+
+    user_id = getattr(request.state, "user_id", None)
+    if user_id:
+        log_data["user_id"] = user_id
+
+    if response.status_code >= 500:
+        _access_log.error(json.dumps(log_data, ensure_ascii=False))
+    elif response.status_code >= 400:
+        _access_log.warning(json.dumps(log_data, ensure_ascii=False))
+    else:
+        _access_log.info(json.dumps(log_data, ensure_ascii=False))
+
+    return response

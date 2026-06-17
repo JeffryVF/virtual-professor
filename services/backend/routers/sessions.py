@@ -13,6 +13,7 @@ from core.database import get_db
 from models.db import Language, Message, MessageRole, Professor, Student, ThresholdNotification
 from models.db import Session as DBSession
 from models.schemas import (
+    ContextChunk,
     MessageResponse,
     MessageSource,
     MessageSourcesResponse,
@@ -82,13 +83,13 @@ async def speak(
 ):
     try:
         session_result = await db.execute(select(DBSession).where(DBSession.id == session_id))
-        session = session_result.scalar_one_or_none()
-        if not session or session.ended_at:
+        session_obj = session_result.scalar_one_or_none()
+        if not session_obj or session_obj.ended_at:
             raise HTTPException(status_code=404, detail="Session not found or already ended")
 
-        prof_result = await db.execute(select(Professor).where(Professor.id == session.professor_id))
+        prof_result = await db.execute(select(Professor).where(Professor.id == session_obj.professor_id))
         professor = prof_result.scalar_one()
-        student_result = await db.execute(select(Student).where(Student.id == session.student_id))
+        student_result = await db.execute(select(Student).where(Student.id == session_obj.student_id))
         student = student_result.scalar_one()
 
         trace = await langfuse_helpers.create_trace(
@@ -96,13 +97,13 @@ async def speak(
             metadata={
                 "professor_id": str(professor.id),
                 "professor_name": professor.name,
-                "session_id": str(session.id),
+                "session_id": str(session_obj.id),
                 "student_id": str(student.id),
             },
         )
 
         try:
-            # 1. STT
+            # 1. STT — graceful fallback: 503 with Spanish message
             audio_bytes = await audio.read()
             async with langfuse_helpers.create_span(trace, "stt_transcribe") as span:
                 try:
@@ -120,88 +121,102 @@ async def speak(
                         span.update(level="ERROR", status_message=f"HTTP {exc.response.status_code}: {exc.response.text[:200]}")
                     log.warning("STT service error (HTTP %s): %s", exc.response.status_code, exc.response.text[:200])
                     raise HTTPException(
-                        status_code=502,
-                        detail=f"Speech-to-text service error on {exc.request.url}: {exc.response.text}",
+                        status_code=503,
+                        detail=json.dumps({"detail": "No se pudo capturar el audio. Intenta de nuevo.", "step": "stt"}),
                     )
                 except Exception as exc:
                     if span is not None:
                         span.update(level="ERROR", status_message=str(exc))
                     log.warning("STT processing error: %s", exc)
                     raise HTTPException(
-                        status_code=502,
-                        detail=f"Speech-to-text processing failed: {type(exc).__name__}: {exc!r}",
+                        status_code=503,
+                        detail=json.dumps({"detail": "No se pudo capturar el audio. Intenta de nuevo.", "step": "stt"}),
                     )
 
             # 2. Load conversation history from Redis
             history = await memory.get_history(str(session_id))
 
-            # 3. Scope check + RAG + LLM
+            # 3. Scope check — graceful fallback: default to in-scope on failure
             context_chunks: list = []
             if not transcript.strip():
                 response_text = (
                     f"No pude entender tu audio. Intenta nuevamente sobre {professor.topic}. / "
                     f"I couldn't understand the audio. Please try again about {professor.topic}."
                 )
-            elif not await llm.is_in_scope(transcript, professor.topic, trace=trace):
-                response_text = (
-                    f"Por favor realiza preguntas relacionadas con {professor.topic}. "
-                    f"Solo puedo ayudarte con ese tema. / "
-                    f"Please ask questions related to {professor.topic}. "
-                    f"I can only help with that subject."
-                )
             else:
-                async with langfuse_helpers.create_span(trace, "rag_retrieve") as span:
-                    context_chunks = await rag.retrieve_context(
-                        transcript,
-                        professor.collection,
-                        trace_id=getattr(trace, "id", None),
-                        trace=trace,
+                try:
+                    in_scope = await llm.is_in_scope(transcript, professor.topic, trace=trace)
+                except Exception as exc:
+                    log.warning("Scope check failed, defaulting to in-scope: %s", exc)
+                    in_scope = True
+
+                if not in_scope:
+                    response_text = (
+                        f"Por favor realiza preguntas relacionadas con {professor.topic}. "
+                        f"Solo puedo ayudarte con ese tema. / "
+                        f"Please ask questions related to {professor.topic}. "
+                        f"I can only help with that subject."
                     )
-                    if span is not None:
-                        span.update(
-                            input={"query": transcript, "collection": professor.collection},
-                            output={"chunk_count": len(context_chunks)},
+                else:
+                    # 4. RAG — graceful fallback: LLM-only with KB unavailable note
+                    rag_failed = False
+                    try:
+                        async with langfuse_helpers.create_span(trace, "rag_retrieve") as span:
+                            context_chunks = await rag.retrieve_context(
+                                transcript,
+                                professor.collection,
+                                trace_id=getattr(trace, "id", None),
+                                trace=trace,
+                            )
+                            if span is not None:
+                                span.update(
+                                    input={"query": transcript, "collection": professor.collection},
+                                    output={"chunk_count": len(context_chunks)},
+                                )
+                    except Exception as exc:
+                        log.warning("RAG retrieval failed, falling back to LLM-only: %s", exc)
+                        rag_failed = True
+                        context_chunks = [
+                            ContextChunk(
+                                text="Note: knowledge base unavailable",
+                                source_document="",
+                                source_document_id="",
+                                score=0.0,
+                            )
+                        ]
+                        if span is not None:
+                            span.update(level="ERROR", status_message=str(exc))
+
+                    # Fire-and-forget notification when scope passes but threshold filters all chunks
+                    if not context_chunks and not rag_failed:
+                        log.warning(
+                            "RAG threshold filter eliminated all chunks for professor %s — query: %s",
+                            professor.id,
+                            transcript,
+                        )
+                        db.add(ThresholdNotification(
+                            professor_id=professor.id,
+                            query=transcript,
+                        ))
+                        await db.commit()
+
+                    # 5. LLM — graceful fallback: 503 with Spanish message
+                    try:
+                        response_text = await llm.generate_response(
+                            system_prompt=professor.system_prompt,
+                            history=history,
+                            context_chunks=context_chunks,
+                            query=transcript,
+                            trace=trace,
+                        )
+                    except Exception as exc:
+                        log.warning("LLM generation failed: %s", exc)
+                        raise HTTPException(
+                            status_code=503,
+                            detail=json.dumps({"detail": "El profesor está pensando... Intenta de nuevo.", "step": "llm"}),
                         )
 
-                # Fire-and-forget notification when scope passes but threshold filters all chunks
-                if not context_chunks:
-                    log.warning(
-                        "RAG threshold filter eliminated all chunks for professor %s — query: %s",
-                        professor.id,
-                        transcript,
-                    )
-                    db.add(ThresholdNotification(
-                        professor_id=professor.id,
-                        query=transcript,
-                    ))
-                    await db.commit()
-
-                response_text = await llm.generate_response(
-                    system_prompt=professor.system_prompt,
-                    history=history,
-                    context_chunks=context_chunks,
-                    query=transcript,
-                    trace=trace,
-                )
-
-            # 4. TTS
-            try:
-                async with langfuse_helpers.create_span(trace, "tts_synthesize") as span:
-                    audio_response = await tts.synthesize(response_text)
-                    if span is not None:
-                        span.update(
-                            input={"text_length": len(response_text)},
-                            output={"audio_bytes": len(audio_response)},
-                        )
-            except httpx.HTTPStatusError as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Text-to-speech service error on {exc.request.url}: {exc.response.text}",
-                )
-            except Exception as exc:
-                raise HTTPException(status_code=502, detail=f"Text-to-speech processing failed: {type(exc).__name__}: {exc!r}")
-
-            # 5. Persist messages (with source citations from RAG)
+            # 6. Persist messages (with source citations from RAG)
             context_sources: list[dict] = []
             if context_chunks:
                 context_sources = [
@@ -227,9 +242,22 @@ async def speak(
             )
             await db.commit()
 
-            # 6. Update Redis memory
+            # 7. Update Redis memory
             await memory.append_message(str(session_id), "user", transcript)
             await memory.append_message(str(session_id), "assistant", response_text)
+
+            # 8. TTS — graceful fallback: return text-only JSON on failure
+            try:
+                async with langfuse_helpers.create_span(trace, "tts_synthesize") as span:
+                    audio_response = await tts.synthesize(response_text)
+                    if span is not None:
+                        span.update(
+                            input={"text_length": len(response_text)},
+                            output={"audio_bytes": len(audio_response)},
+                        )
+            except Exception as exc:
+                log.warning("TTS synthesis failed, returning text-only: %s", exc)
+                return {"text": response_text, "audio": None}
 
             return Response(content=audio_response, media_type="audio/wav")
         finally:

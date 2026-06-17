@@ -1,4 +1,5 @@
 import { getAccessToken, refreshTokens, clearTokens } from '@/lib/auth'
+import { handleApiError } from '@/lib/error-handler'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? '/api'
 
@@ -67,8 +68,7 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
 async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await authFetch(path, init)
   if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`${res.status} ${text}`)
+    throw await handleApiError(res)
   }
   return res.json() as Promise<T>
 }
@@ -93,7 +93,7 @@ export const updateProfessor = (id: string, data: Partial<ProfessorCreate>) =>
 
 export const deleteProfessor = async (id: string): Promise<void> => {
   const res = await authFetch(`/admin/professors/${id}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
+  if (!res.ok) throw await handleApiError(res)
 }
 
 export interface Student {
@@ -136,7 +136,7 @@ export const uploadDocument = (professorId: string, file: File) => {
 
 export const deleteDocument = async (documentId: string): Promise<void> => {
   const res = await authFetch(`/admin/documents/${documentId}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
+  if (!res.ok) throw await handleApiError(res)
 }
 
 // ── RAG / Indexing ────────────────────────────────────────────────────────────
@@ -216,7 +216,7 @@ export const getSessionHistory = (sessionId: string) =>
 
 export const endSession = async (sessionId: string): Promise<void> => {
   const res = await authFetch(`/sessions/${sessionId}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
+  if (!res.ok) throw await handleApiError(res)
 }
 
 export async function speakInSession(sessionId: string, audio: Blob): Promise<ArrayBuffer> {
@@ -226,6 +226,6 @@ export async function speakInSession(sessionId: string, audio: Blob): Promise<Ar
     method: 'POST',
     body: form,
   })
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
+  if (!res.ok) throw await handleApiError(res)
   return res.arrayBuffer()
 }

@@ -84,6 +84,7 @@ def decode_token(token: str) -> dict:
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
+    request: Request = None,
 ) -> User:
     if credentials is None:
         raise HTTPException(
@@ -107,6 +108,9 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="User is inactive"
         )
+
+    if request is not None:
+        request.state.user_id = str(user.id)
 
     return user
 
