@@ -1,21 +1,29 @@
+import json
 import logging
 import os
 import shutil
+import time
 import uuid
 from uuid import UUID
 
 import magic
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
-from sqlalchemy import select
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_db
-from dependencies.auth import verify_admin_or_deprecated_key
+from dependencies.auth import require_admin, verify_admin_or_deprecated_key
 from models.db import Document, DocumentStatus, Message, Professor
 from models.db import Session as DBSession
 from models.schemas import (
+    ChunkDetail,
+    CollectionStatus,
+    DocumentChunksResponse,
     DocumentResponse,
+    IndexingStatusResponse,
     MessageResponse,
     ProfessorCreate,
     ProfessorResponse,
@@ -253,6 +261,290 @@ async def delete_document(
     await delete_document_chunks(prof.collection, str(document_id))
     await db.delete(doc)
     await db.commit()
+
+
+# ── Chunks ─────────────────────────────────────────────────────────────────────
+
+@router.get("/documents/{document_id}/chunks", response_model=DocumentChunksResponse)
+async def get_document_chunks(
+    document_id: UUID,
+    full: bool = Query(False, description="Return full text instead of truncated 500 chars"),
+    offset: int = Query(0, ge=0, description="Zero-based offset for pagination"),
+    limit: int = Query(50, ge=1, le=200, description="Page size (max 200)"),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_admin_or_deprecated_key),
+):
+    """Scroll Qdrant points for a specific document and return paginated chunks."""
+    result = await db.execute(select(Document).where(Document.id == document_id))
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if doc.status != DocumentStatus.ready:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Document status is '{doc.status.value}', expected 'ready'",
+        )
+
+    prof_result = await db.execute(select(Professor).where(Professor.id == doc.professor_id))
+    prof = prof_result.scalar_one()
+
+    aclient = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
+    try:
+        # Check the collection exists
+        try:
+            collections = await aclient.get_collections()
+        except Exception:
+            return DocumentChunksResponse(
+                document_id=str(document_id),
+                document_name=doc.filename,
+                total_chunks=0,
+                chunks=[],
+            )
+
+        existing = {c.name for c in collections.collections}
+        if prof.collection not in existing:
+            return DocumentChunksResponse(
+                document_id=str(document_id),
+                document_name=doc.filename,
+                total_chunks=0,
+                chunks=[],
+            )
+
+        # Count total points for this document
+        point_filter = Filter(
+            must=[FieldCondition(key="document_id", match=MatchValue(value=str(document_id)))]
+        )
+        count_result = await aclient.count(
+            collection_name=prof.collection,
+            count_filter=point_filter,
+            exact=True,
+        )
+        total = count_result.count
+
+        # Scroll points for the requested page
+        scroll_limit = min(offset + limit, 10000)
+        points, _ = await aclient.scroll(
+            collection_name=prof.collection,
+            scroll_filter=point_filter,
+            limit=scroll_limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        # Slice the requested page
+        page_points = points[offset: offset + limit]
+
+        chunks: list[ChunkDetail] = []
+        for idx, point in enumerate(page_points):
+            # Extract text from _node_content JSON
+            node_content_raw = point.payload.get("_node_content", "{}")
+            if isinstance(node_content_raw, str):
+                try:
+                    node_data = json.loads(node_content_raw)
+                except (json.JSONDecodeError, TypeError):
+                    node_data = {}
+            else:
+                node_data = node_content_raw or {}
+
+            text = node_data.get("text", "")
+
+            if not full:
+                text = text[:500]
+
+            chunks.append(
+                ChunkDetail(
+                    chunk_index=offset + idx,
+                    text=text,
+                    score=None,
+                    page_number=point.payload.get("page_label"),
+                )
+            )
+
+        return DocumentChunksResponse(
+            document_id=str(document_id),
+            document_name=doc.filename,
+            total_chunks=total,
+            chunks=chunks,
+        )
+    finally:
+        try:
+            await aclient.close()
+        except Exception:
+            pass
+
+
+# ── Reindex ───────────────────────────────────────────────────────────────────
+
+# In-memory cooldown: no more than 1 reindex per document per 60 seconds
+_reindex_cooldown: dict[str, float] = {}
+
+
+@router.post("/documents/{document_id}/reindex", status_code=202)
+async def reindex_document(
+    document_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_admin_or_deprecated_key),
+):
+    """Reset a document to pending and re-run ingestion via background task."""
+    result = await db.execute(select(Document).where(Document.id == document_id))
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc_id_str = str(document_id)
+
+    # Cooldown check first — prevents hammering regardless of document status
+    now = time.time()
+    last = _reindex_cooldown.get(doc_id_str, 0)
+    if now - last < 60:
+        remaining = int(60 - (now - last))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Reindex cooldown active: try again in {remaining}s",
+        )
+    _reindex_cooldown[doc_id_str] = now
+
+    if doc.status in (DocumentStatus.pending, DocumentStatus.processing):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot reindex document with status '{doc.status.value}'",
+        )
+
+    # Reset document
+    doc.status = DocumentStatus.pending
+    doc.error_message = None
+    await db.commit()
+
+    # Get professor for collection name
+    prof_result = await db.execute(select(Professor).where(Professor.id == doc.professor_id))
+    prof = prof_result.scalar_one()
+
+    # Delete existing Qdrant chunks
+    await delete_document_chunks(prof.collection, doc_id_str)
+
+    # Construct file path
+    save_path = os.path.join(UPLOAD_DIR, str(doc.professor_id), f"{doc_id_str}.{doc.format}")
+
+    # Schedule background ingestion
+    background_tasks.add_task(ingest_document, doc_id_str, prof.collection, save_path, doc.format)
+
+    return {"status": "reindexing", "document_id": doc_id_str}
+
+
+# ── Indexing Status ───────────────────────────────────────────────────────────
+
+@router.get("/indexing/status", response_model=IndexingStatusResponse)
+async def get_indexing_status(
+    db: AsyncSession = Depends(get_db),
+    _=Depends(verify_admin_or_deprecated_key),
+):
+    """Return per-collection indexing statistics for all professors."""
+    prof_result = await db.execute(select(Professor))
+    professors = prof_result.scalars().all()
+
+    collection_statuses: list[CollectionStatus] = []
+
+    aclient = AsyncQdrantClient(url=settings.qdrant_url, timeout=30)
+    try:
+        # Get existing Qdrant collections once
+        try:
+            collections_result = await aclient.get_collections()
+            existing_collections = {c.name for c in collections_result.collections}
+        except Exception:
+            existing_collections = set()
+
+        for prof in professors:
+            # Document stats from DB
+            doc_count_result = await db.execute(
+                select(Document.status, func.count(Document.id)).where(
+                    Document.professor_id == prof.id
+                ).group_by(Document.status)
+            )
+            doc_counts: dict[str, int] = {}
+            total_chunks = 0
+            for status_value, count in doc_count_result:
+                doc_counts[status_value.value] = count
+
+            # Sum chunk_count
+            chunk_sum_result = await db.execute(
+                select(func.coalesce(func.sum(Document.chunk_count), 0)).where(
+                    Document.professor_id == prof.id
+                )
+            )
+            total_chunks = chunk_sum_result.scalar() or 0
+
+            # Total documents
+            total_docs_result = await db.execute(
+                select(func.count(Document.id)).where(Document.professor_id == prof.id)
+            )
+            total_documents = total_docs_result.scalar() or 0
+
+            # Last indexed at (most recent ready document)
+            last_ready_result = await db.execute(
+                select(Document.uploaded_at)
+                .where(Document.professor_id == prof.id, Document.status == DocumentStatus.ready)
+                .order_by(Document.uploaded_at.desc())
+                .limit(1)
+            )
+            last_ready = last_ready_result.scalar_one_or_none()
+            last_indexed_at = last_ready.isoformat() if last_ready else None
+
+            # Last error (most recent error document's message)
+            last_error_result = await db.execute(
+                select(Document.error_message)
+                .where(Document.professor_id == prof.id, Document.status == DocumentStatus.error)
+                .order_by(Document.uploaded_at.desc())
+                .limit(1)
+            )
+            last_error = last_error_result.scalar_one_or_none()
+
+            # Qdrant point count
+            qdrant_points = 0
+            if prof.collection in existing_collections:
+                try:
+                    collection_info = await aclient.get_collection(collection_name=prof.collection)
+                    qdrant_points = collection_info.points_count
+                except Exception:
+                    qdrant_points = 0
+
+            collection_statuses.append(
+                CollectionStatus(
+                    professor_id=str(prof.id),
+                    professor_name=prof.name,
+                    collection=prof.collection,
+                    total_documents=total_documents,
+                    documents_by_status=doc_counts,
+                    total_chunks=total_chunks,
+                    qdrant_points=qdrant_points,
+                    last_indexed_at=last_indexed_at,
+                    last_error=last_error,
+                )
+            )
+    finally:
+        try:
+            await aclient.close()
+        except Exception:
+            pass
+
+    # Compute summary
+    total_collections = len(collection_statuses)
+    total_documents = sum(c.total_documents for c in collection_statuses)
+    total_chunks = sum(c.total_chunks for c in collection_statuses)
+    collections_with_errors = sum(
+        1 for c in collection_statuses if c.last_error is not None
+    )
+
+    return IndexingStatusResponse(
+        collections=collection_statuses,
+        summary={
+            "total_collections": total_collections,
+            "total_documents": total_documents,
+            "total_chunks": total_chunks,
+            "collections_with_errors": collections_with_errors,
+        },
+    )
 
 
 # ── Sessions (admin view) ─────────────────────────────────────────────────────

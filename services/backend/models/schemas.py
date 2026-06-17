@@ -115,6 +115,7 @@ class ContextChunk(BaseModel):
     source_document_id: str
     source_page: str | None = None
     trace_id: str | None = None
+    score: float | None = None
 
 
 # ── Message ───────────────────────────────────────────────────────────────────
@@ -125,6 +126,68 @@ class MessageResponse(BaseModel):
     role: str
     content: str
     audio_path: Optional[str]
+    sources_json: Optional[str] = None
     timestamp: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ── Chunks ────────────────────────────────────────────────────────────────────
+
+class ChunkDetail(BaseModel):
+    """A single chunk from a document stored in Qdrant."""
+
+    chunk_index: int
+    text: str
+    score: float | None = None
+    page_number: str | None = None
+
+
+class DocumentChunksResponse(BaseModel):
+    """Paginated chunks for a specific document."""
+
+    document_id: str
+    document_name: str
+    total_chunks: int
+    chunks: list[ChunkDetail]
+
+
+# ── Indexing Status ───────────────────────────────────────────────────────────
+
+class CollectionStatus(BaseModel):
+    """Indexing status for a single professor collection."""
+
+    professor_id: str
+    professor_name: str
+    collection: str
+    total_documents: int
+    documents_by_status: dict[str, int]
+    total_chunks: int
+    qdrant_points: int
+    last_indexed_at: str | None = None
+    last_error: str | None = None
+
+
+class IndexingStatusResponse(BaseModel):
+    """Aggregated indexing status across all collections."""
+
+    collections: list[CollectionStatus]
+    summary: dict[str, int]
+
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+
+class MessageSource(BaseModel):
+    """Source document citation for a single message."""
+
+    document_id: str
+    document_name: str
+    relevance_score: float | None = None
+    snippet: str
+    page_number: str | None = None
+
+
+class MessageSourcesResponse(BaseModel):
+    """Sources used to generate a specific message."""
+
+    sources: list[MessageSource]

@@ -11,6 +11,8 @@ with professor/session/student metadata.
 """
 
 import io
+import json
+from uuid import UUID
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,7 +20,8 @@ import pytest_asyncio
 from sqlalchemy import select
 
 from core.database import AsyncSessionLocal
-from models.db import Language, Professor, ThresholdNotification
+from models.db import Language, Message, Professor, ThresholdNotification
+from models.schemas import ContextChunk
 
 
 @pytest_asyncio.fixture
@@ -177,7 +180,7 @@ async def test_speak_no_langfuse_errors_when_disabled(
         json={"professor_id": str(test_professor.id), "student_id": student_id},
     )
     assert session_resp.status_code == 201
-    session_id = session_resp.json()["id"]
+    session_id = UUID(session_resp.json()["id"])
 
     with (
         patch("routers.sessions.rag") as mock_rag,
@@ -192,7 +195,14 @@ async def test_speak_no_langfuse_errors_when_disabled(
             return_value="Biology is the study of life."
         )
         mock_rag.retrieve_context = AsyncMock(
-            return_value=[MagicMock(text="Life is complex.", source_document="bio.pdf")]
+            return_value=[
+                ContextChunk(
+                    text="Life is complex.",
+                    source_document="bio.pdf",
+                    source_document_id="doc-1",
+                    score=0.95,
+                )
+            ]
         )
         mock_tts.synthesize = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
@@ -205,6 +215,19 @@ async def test_speak_no_langfuse_errors_when_disabled(
         )
 
     assert response.status_code == 200
+
+    # Verify sources were saved to the Message
+    async with AsyncSessionLocal() as check_session:
+        result = await check_session.execute(
+            select(Message).where(Message.session_id == session_id)
+        )
+        messages = result.scalars().all()
+        # professor message should have sources_json
+        prof_msgs = [m for m in messages if m.role.value == "professor"]
+        assert len(prof_msgs) >= 1
+        sources = json.loads(prof_msgs[-1].sources_json) if prof_msgs[-1].sources_json else []
+        assert len(sources) >= 1
+        assert sources[0]["document_name"] == "bio.pdf"
 
 
 @pytest.mark.asyncio
@@ -261,7 +284,14 @@ async def test_speak_creates_trace_when_langfuse_enabled(
             return_value="Cells are the basic unit of life."
         )
         mock_rag.retrieve_context = AsyncMock(
-            return_value=[MagicMock(text="Cells reproduce.", source_document="bio.pdf")]
+            return_value=[
+                ContextChunk(
+                    text="Cells reproduce.",
+                    source_document="bio.pdf",
+                    source_document_id="doc-1",
+                    score=0.92,
+                )
+            ]
         )
         mock_tts.synthesize = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
@@ -380,3 +410,237 @@ async def test_liveavatar_connect_rejects_non_uuid_avatar_id(async_client, test_
 
     assert response.status_code == 422
     assert "valid UUID" in response.json()["detail"]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Source Citations
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_speak_saves_sources_to_message(
+    async_app, async_client, test_professor, db_session
+):
+    """GIVEN a /speak request with valid context chunks
+    WHEN the response is generated
+    THEN the professor Message record SHALL have sources_json with source metadata.
+    """
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "Src Student", "email": "srctest@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = UUID(session_resp.json()["id"])
+
+    with (
+        patch("routers.sessions.rag") as mock_rag,
+        patch("routers.sessions.llm") as mock_llm_module,
+        patch("routers.sessions.stt") as mock_stt,
+        patch("routers.sessions.tts") as mock_tts,
+        patch("routers.sessions.memory") as mock_memory,
+    ):
+        mock_stt.transcribe = AsyncMock(return_value="What is biology?")
+        mock_llm_module.is_in_scope = AsyncMock(return_value=True)
+        mock_llm_module.generate_response = AsyncMock(
+            return_value="Biology is the study of life."
+        )
+        mock_rag.retrieve_context = AsyncMock(
+            return_value=[
+                ContextChunk(
+                    text="Cells are the basic unit of life.",
+                    source_document="biology_101.pdf",
+                    source_document_id="doc-abc",
+                    source_page="5",
+                    score=0.95,
+                ),
+                ContextChunk(
+                    text="DNA contains genetic information.",
+                    source_document="biology_101.pdf",
+                    source_document_id="doc-abc",
+                    source_page="12",
+                    score=0.87,
+                ),
+            ]
+        )
+        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_memory.get_history = AsyncMock(return_value=[])
+        mock_memory.append_message = AsyncMock()
+
+        audio_file = io.BytesIO(b"fake audio bytes")
+        response = await async_client.post(
+            f"/sessions/{session_id}/speak",
+            files={"audio": ("test.wav", audio_file, "audio/wav")},
+        )
+
+    assert response.status_code == 200
+
+    # Verify sources were persisted in the professor Message
+    async with AsyncSessionLocal() as check_session:
+        result = await check_session.execute(
+            select(Message)
+            .where(Message.session_id == session_id)
+            .order_by(Message.timestamp)
+        )
+        messages = result.scalars().all()
+        assert len(messages) == 2  # student + professor
+
+        # Professor message should have sources
+        prof_msg = messages[1]
+        assert prof_msg.role.value == "professor"
+        assert prof_msg.sources_json is not None
+
+        sources = json.loads(prof_msg.sources_json)
+        assert len(sources) == 2
+        assert sources[0]["document_id"] == "doc-abc"
+        assert sources[0]["document_name"] == "biology_101.pdf"
+        assert sources[0]["relevance_score"] == 0.95
+        assert sources[0]["page_number"] == "5"
+        assert len(sources[0]["snippet"]) <= 200
+
+        assert sources[1]["document_id"] == "doc-abc"
+        assert sources[1]["relevance_score"] == 0.87
+        assert sources[1]["page_number"] == "12"
+
+
+@pytest.mark.asyncio
+async def test_get_message_sources(
+    async_app, async_client, test_professor, db_session
+):
+    """GIVEN a message with sources_json
+    WHEN GET /sessions/{session_id}/messages/{message_id}/sources
+    THEN the sources SHALL be returned.
+    """
+    # Create student and session via API
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "GetSrc Student", "email": "getsrctest@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = UUID(session_resp.json()["id"])
+
+    with (
+        patch("routers.sessions.rag") as mock_rag,
+        patch("routers.sessions.llm") as mock_llm_module,
+        patch("routers.sessions.stt") as mock_stt,
+        patch("routers.sessions.tts") as mock_tts,
+        patch("routers.sessions.memory") as mock_memory,
+    ):
+        mock_stt.transcribe = AsyncMock(return_value="Tell me about DNA")
+        mock_llm_module.is_in_scope = AsyncMock(return_value=True)
+        mock_llm_module.generate_response = AsyncMock(
+            return_value="DNA is the molecule of heredity."
+        )
+        mock_rag.retrieve_context = AsyncMock(
+            return_value=[
+                ContextChunk(
+                    text="DNA is double-stranded.",
+                    source_document="genetics.pdf",
+                    source_document_id="doc-xyz",
+                    source_page="3",
+                    score=0.91,
+                )
+            ]
+        )
+        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_memory.get_history = AsyncMock(return_value=[])
+        mock_memory.append_message = AsyncMock()
+
+        audio_file = io.BytesIO(b"fake audio bytes")
+        response = await async_client.post(
+            f"/sessions/{session_id}/speak",
+            files={"audio": ("test.wav", audio_file, "audio/wav")},
+        )
+
+    assert response.status_code == 200
+
+    # Fetch the professor message ID
+    async with AsyncSessionLocal() as check_session:
+        result = await check_session.execute(
+            select(Message)
+            .where(Message.session_id == session_id, Message.role == "professor")
+            .order_by(Message.timestamp.desc())
+            .limit(1)
+        )
+        prof_msg = result.scalar_one()
+        message_id = prof_msg.id
+
+    # Fetch sources via the API
+    sources_resp = await async_client.get(
+        f"/sessions/{session_id}/messages/{message_id}/sources",
+    )
+    assert sources_resp.status_code == 200
+    body = sources_resp.json()
+    assert len(body["sources"]) == 1
+    assert body["sources"][0]["document_id"] == "doc-xyz"
+    assert body["sources"][0]["document_name"] == "genetics.pdf"
+    assert body["sources"][0]["relevance_score"] == 0.91
+    assert body["sources"][0]["page_number"] == "3"
+
+
+@pytest.mark.asyncio
+async def test_get_message_sources_not_found(async_client):
+    """GIVEN a non-existent message_id
+    WHEN GET /sessions/{session_id}/messages/{message_id}/sources
+    THEN 404 is returned.
+    """
+    response = await async_client.get(
+        "/sessions/00000000-0000-0000-0000-000000000000/messages/00000000-0000-0000-0000-000000000000/sources",
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_message_sources_empty(async_app, async_client, test_professor, db_session):
+    """GIVEN a message with no sources_json
+    WHEN GET /sessions/{session_id}/messages/{message_id}/sources
+    THEN empty sources list is returned.
+    """
+    from uuid import UUID
+    from models.db import MessageRole
+
+    # Create a session
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "NoSrc Student", "email": "nosrc@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = UUID(session_resp.json()["id"])
+
+    # Manually add a message without sources using proper UUID
+    msg = Message(
+        session_id=session_id,
+        role=MessageRole.professor,
+        content="Test content without sources",
+    )
+    async with AsyncSessionLocal() as sess:
+        sess.add(msg)
+        await sess.commit()
+        await sess.refresh(msg)
+        message_id = msg.id
+
+    response = await async_client.get(
+        f"/sessions/{session_id}/messages/{message_id}/sources",
+    )
+    assert response.status_code == 200
+    assert response.json()["sources"] == []

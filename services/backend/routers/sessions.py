@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime
 from uuid import UUID
@@ -13,6 +14,8 @@ from models.db import Language, Message, MessageRole, Professor, Student, Thresh
 from models.db import Session as DBSession
 from models.schemas import (
     MessageResponse,
+    MessageSource,
+    MessageSourcesResponse,
     SessionCreate,
     SessionResponse,
     StudentCreate,
@@ -133,6 +136,7 @@ async def speak(
             history = await memory.get_history(str(session_id))
 
             # 3. Scope check + RAG + LLM
+            context_chunks: list = []
             if not transcript.strip():
                 response_text = (
                     f"No pude entender tu audio. Intenta nuevamente sobre {professor.topic}. / "
@@ -197,9 +201,30 @@ async def speak(
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=f"Text-to-speech processing failed: {type(exc).__name__}: {exc!r}")
 
-            # 5. Persist messages
+            # 5. Persist messages (with source citations from RAG)
+            context_sources: list[dict] = []
+            if context_chunks:
+                context_sources = [
+                    {
+                        "document_id": chunk.source_document_id,
+                        "document_name": chunk.source_document,
+                        "relevance_score": chunk.score,
+                        "snippet": chunk.text[:200],
+                        "page_number": chunk.source_page,
+                    }
+                    for chunk in context_chunks
+                ]
+            sources_json = json.dumps(context_sources) if context_sources else None
+
             db.add(Message(session_id=session_id, role=MessageRole.student, content=transcript))
-            db.add(Message(session_id=session_id, role=MessageRole.professor, content=response_text))
+            db.add(
+                Message(
+                    session_id=session_id,
+                    role=MessageRole.professor,
+                    content=response_text,
+                    sources_json=sources_json,
+                )
+            )
             await db.commit()
 
             # 6. Update Redis memory
@@ -286,3 +311,31 @@ async def end_session(session_id: UUID, db: AsyncSession = Depends(get_db)):
     session.ended_at = datetime.utcnow()
     await db.commit()
     await memory.clear_session(str(session_id))
+
+
+@router.get("/{session_id}/messages/{message_id}/sources", response_model=MessageSourcesResponse)
+async def get_message_sources(
+    session_id: UUID,
+    message_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve source citations for a specific message in a session."""
+    result = await db.execute(
+        select(Message).where(
+            Message.id == message_id,
+            Message.session_id == session_id,
+        )
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found in session")
+
+    if not msg.sources_json:
+        return {"sources": []}
+
+    try:
+        sources_data = json.loads(msg.sources_json)
+    except (json.JSONDecodeError, TypeError):
+        return {"sources": []}
+
+    return {"sources": sources_data}

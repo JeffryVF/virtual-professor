@@ -103,6 +103,7 @@ class Message(Base):
     role: Mapped[MessageRole] = mapped_column(SAEnum(MessageRole))
     content: Mapped[str] = mapped_column(Text)
     audio_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sources_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
     session: Mapped["Session"] = relationship(back_populates="messages")
