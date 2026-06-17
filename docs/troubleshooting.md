@@ -1,7 +1,17 @@
 # RAG Troubleshooting Guide — Virtual Professor
 
 > Diagnóstico de errores críticos, impacto en producción y plan de remediación.
-> Versión: 1.0 — Junio 2026
+> Versión: 2.0 — Junio 2026
+
+---
+
+## Current Status
+
+| Issue | Status | Notes |
+|-------|--------|-------|
+| CRIT-01: Relevance threshold | ✅ **RESOLVED** | `filter_nodes_by_score()` in `services/rag.py` applies `MIN_RELEVANCE_SCORE`. Configurable via `RAG_MIN_RELEVANCE_SCORE` env var. |
+| CRIT-02: Reranker | ✅ **RESOLVED** | `BGELocalReranker` in `services/reranker.py`, wired in `retrieve_context()`. Configurable via `RERANKER_TYPE`, `RERANKER_MODEL`, `RERANKER_TOP_N`. |
+| CRIT-03: Source citations | ⚠️ **BACKEND DONE — FRONTEND PENDING** | `ContextChunk` schema, `[Source: ...]` labels, and citation instructions in system prompt are implemented. Frontend citation display is tracked in [plan 04](plans/04-rag-visible.md). |
 
 ---
 

@@ -355,8 +355,10 @@ class TestLangfuseSpans:
             mock_client_cls.return_value.__aenter__.return_value = mock_client
             mock_client.post = AsyncMock(return_value=mock_response)
 
+            # Use a query that doesn't match the fast-path keyword checks
+            # so it falls through to the LLM which then creates the Langfuse span
             result = await is_in_scope(
-                "What is quantum physics?",
+                "Why do we need wave functions?",
                 "physics",
                 trace=mock_trace,
             )

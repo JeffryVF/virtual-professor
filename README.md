@@ -51,25 +51,35 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 │                                                                 │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
 │  │Session Router│  │ Admin Router │  │  LiveAvatar LITE      │  │
-│  │  /session/*  │  │  /admin/*    │  │  Connector           │  │
+│  │  /sessions/* │  │  /admin/*    │  │  Connector           │  │
 │  └──────┬───────┘  └──────┬───────┘  └──────────────────────┘  │
 │         │                 │                                     │
 │  ┌──────▼─────────────────▼──────────────────────────────────┐  │
-│  │                  Orchestrator (Agent)                      │  │
-│  │   1. STT  →  2. Scope Check  →  3. RAG  →  4. TTS        │  │
+│  │               Orchestrator (Agent)                         │  │
+│  │   1. STT → 2. Scope Check → 3. RAG → 4. Reranker          │  │
+│  │         → 5. LLM Prompt → 6. TTS                          │  │
+│  │                           ┌──────────────────────────┐     │  │
+│  │                           │  Langfuse Observability   │     │  │
+│  │                           │  (traces every step)      │     │  │
+│  │                           └──────────────────────────┘     │  │
 │  └──────┬───────────┬──────────────────┬──────────┬──────────┘  │
 └─────────┼───────────┼──────────────────┼──────────┼────────────┘
           │           │                  │          │
     ┌─────▼──┐  ┌─────▼──┐  ┌───────────▼──┐ ┌────▼────┐
     │Whisper │  │ Ollama │  │    Qdrant    │ │ Kokoro  │
     │  STT   │  │  LLM   │  │  Vector DB   │ │   TTS   │
-    └────────┘  └────────┘  └──────────────┘ └─────────┘
-                                    │
-                             ┌──────▼──────┐   ┌─────────┐
-                             │  PostgreSQL │   │  Redis  │
-                             │  (profiles, │   │(sessions│
-                             │   history)  │   │ cache)  │
-                             └─────────────┘   └─────────┘
+    └────────┘  └────────┘  └──────┬───────┘ └─────────┘
+                                   │
+                            ┌──────▼──────┐   ┌─────────┐
+                            │ BGE Reranker│   │  Redis  │
+                            │  (local)    │   │(sessions│
+                            └─────────────┘   │ cache)  │
+                                              └─────────┘
+                            ┌──────────────┐
+                            │  PostgreSQL  │
+                            │  (profiles,  │
+                            │   history)   │
+                            └──────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
 │                     BROWSER (Admin)                             │
@@ -264,9 +274,11 @@ Document status updated to "ready"
 |---|---|---|
 | `GET` | `/professors` | List available professors (public) |
 | `GET` | `/professors/{id}` | Get professor info |
-| `POST` | `/students` | Register student |
+| `POST` | `/sessions/students` | Register student |
 | `POST` | `/sessions` | Start a new session |
 | `POST` | `/sessions/{id}/speak` | Send audio, receive audio response |
+| `POST` | `/sessions/{id}/liveavatar-connect` | Exchange LiveAvatar token for session |
+| `POST` | `/sessions/{id}/compress` | Compress completed session |
 | `GET` | `/sessions/{id}/history` | Get conversation history |
 | `DELETE` | `/sessions/{id}` | End session |
 
@@ -275,10 +287,12 @@ Document status updated to "ready"
 ## Directory Structure
 
 ```
-virtual_profesor/
+virtual-professor/
 ├── docker-compose.yml
+├── docker-compose.override.yml       ← dev overrides (hot-reload, debug)
 ├── .env.example
 ├── README.md
+├── AGENTS.md                         ← AI contributor guide
 │
 ├── services/
 │   ├── backend/
@@ -292,32 +306,54 @@ virtual_profesor/
 │   │   ├── services/
 │   │   │   ├── stt.py                ← Whisper HTTP client
 │   │   │   ├── tts.py                ← Kokoro HTTP client
-│   │   │   ├── llm.py                ← Ollama OpenAI-compatible client
+│   │   │   ├── llm.py                ← Ollama client + prompt building
 │   │   │   ├── rag.py                ← LlamaIndex + Qdrant retrieval
+│   │   │   ├── reranker.py           ← BGE cross-encoder reranker
 │   │   │   ├── memory.py             ← Redis session context manager
 │   │   │   ├── ingestion.py          ← document processing pipeline
-│   │   │   └── liveavatar.py         ← LiveAvatar LITE connector
+│   │   │   ├── liveavatar.py         ← LiveAvatar LITE connector
+│   │   │   └── langfuse.py           ← Langfuse observability helpers
 │   │   ├── models/
 │   │   │   ├── db.py                 ← SQLAlchemy ORM models
 │   │   │   └── schemas.py            ← Pydantic request/response schemas
-│   │   └── core/
-│   │       ├── config.py             ← settings from environment variables
-│   │       └── database.py           ← DB session factory
+│   │   ├── core/
+│   │   │   ├── config.py             ← settings from environment variables
+│   │   │   └── database.py           ← DB session factory
+│   │   └── tests/
+│   │       ├── conftest.py           ← pytest fixtures + test client
+│   │       ├── test_rag.py           ← retrieval, reranker, context chunk tests
+│   │       ├── test_llm.py           ← prompt building, [Source:] label tests
+│   │       ├── test_sessions.py      ← session lifecycle + speak endpoint
+│   │       └── test_validation.py    ← file upload validation tests
 │   │
 │   ├── frontend/
 │   │   ├── Dockerfile
 │   │   ├── package.json
-│   │   ├── pages/
-│   │   │   ├── index.tsx             ← landing / professor selection
-│   │   │   ├── session/[id].tsx      ← live voice session with avatar
-│   │   │   └── admin/
-│   │   │       ├── index.tsx         ← admin dashboard
-│   │   │       ├── professors.tsx    ← professor management
-│   │   │       └── documents.tsx     ← document upload + status
-│   │   └── components/
-│   │       ├── AvatarSession/        ← LiveAvatar Web SDK wrapper
-│   │       ├── ProfessorCard/        ← avatar selector UI
-│   │       └── DocumentUpload/       ← drag & drop uploader
+│   │   ├── src/
+│   │   │   ├── app/
+│   │   │   │   ├── layout.tsx        ← root layout
+│   │   │   │   ├── page.tsx          ← landing / professor selection
+│   │   │   │   ├── session/
+│   │   │   │   │   └── [id]/
+│   │   │   │   │       └── page.tsx  ← live voice session with avatar
+│   │   │   │   └── admin/
+│   │   │   │       ├── page.tsx      ← admin dashboard
+│   │   │   │       └── professors/
+│   │   │   │           ├── page.tsx  ← professor management
+│   │   │   │           └── [id]/
+│   │   │   │               └── documents/
+│   │   │   │                   └── page.tsx  ← document upload + status
+│   │   │   ├── components/
+│   │   │   │   ├── student/
+│   │   │   │   │   ├── AvatarSession.tsx  ← LiveAvatar Web SDK wrapper
+│   │   │   │   │   └── ProfessorCard.tsx  ← avatar selector UI
+│   │   │   │   ├── admin/
+│   │   │   │   │   ├── Sidebar.tsx
+│   │   │   │   │   └── ProfessorForm.tsx
+│   │   │   │   └── ui/               ← shadcn/ui components
+│   │   │   └── lib/
+│   │   │       └── api.ts            ← API client with auth headers
+│   │   └── public/
 │   │
 │   └── kokoro/
 │       ├── Dockerfile
@@ -329,101 +365,38 @@ virtual_profesor/
 │   ├── qdrant/                       ← Qdrant persistent storage
 │   └── postgres/                     ← PostgreSQL persistent storage
 │
-└── config/
-    └── nginx.conf                    ← reverse proxy routing
+├── config/
+│   └── nginx.conf                    ← reverse proxy routing
+│
+├── openspec/                         ← SDD change specifications (OpenSpec)
+├── docs/
+│   ├── troubleshooting.md            ← RAG pipeline issue tracking
+│   └── plans/                        ← Implementation plans
+│
+└── RELEASE_CHECKLIST.md              ← Production release checklist
 ```
 
 ---
 
 ## Docker Compose
 
-```yaml
-version: "3.9"
+The stack is defined in [`docker-compose.yml`](./docker-compose.yml) at the repo root. It includes 9 services:
 
-services:
+| Service | Image | Role |
+|---------|-------|------|
+| `nginx` | nginx:alpine | Reverse proxy |
+| `frontend` | custom Node.js | Next.js app |
+| `backend` | custom Python | FastAPI orchestrator |
+| `whisper` | onerahmet/openai-whisper-asr-webservice | Speech-to-Text |
+| `ollama` | ollama/ollama | LLM + embeddings |
+| `qdrant` | qdrant/qdrant | Vector database |
+| `kokoro` | custom Python | Text-to-Speech |
+| `postgres` | postgres:16-alpine | Relational database |
+| `redis` | redis:7-alpine | Session cache |
 
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-    volumes:
-      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - backend
-      - frontend
+Development overrides (hot-reload, debug ports) live in `docker-compose.override.yml` and are applied automatically when you run `docker compose up`.
 
-  frontend:
-    build: ./services/frontend
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost/api
-    depends_on:
-      - backend
-
-  backend:
-    build: ./services/backend
-    env_file: .env
-    volumes:
-      - ./data/uploads:/app/uploads
-    depends_on:
-      - postgres
-      - redis
-      - qdrant
-      - whisper
-      - ollama
-      - kokoro
-
-  whisper:
-    image: onerahmet/openai-whisper:latest-gpu  # use :latest for CPU
-    environment:
-      - ASR_MODEL=base
-    ports:
-      - "9000:9000"
-
-  ollama:
-    image: ollama/ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]  # remove if no GPU
-
-  qdrant:
-    image: qdrant/qdrant
-    ports:
-      - "6333:6333"
-    volumes:
-      - ./data/qdrant:/qdrant/storage
-
-  kokoro:
-    build: ./services/kokoro
-    ports:
-      - "8880:8880"
-
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: virtual_profesor
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - ./data/postgres:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-
-volumes:
-  ollama_data:
-```
+> ⚠️ The inline YAML previously shown here was always stale — see the actual [`docker-compose.yml`](./docker-compose.yml) for the source of truth.
 
 ---
 
@@ -472,13 +445,15 @@ SESSION_TIMEOUT_MINUTES=30
 ## Open Items
 
 | # | Item | Status | Notes |
-|---|---|---|---|
+|---|---|---|---|---|
 | 1 | LiveAvatar API key + sandbox | Pending | Register at liveavatar.com to get key and test LITE mode |
 | 2 | LLM model selection | Pending | Start with `llama3.2` (fast) or `mistral` (quality) |
 | 3 | Kokoro voice selection | Pending | Pick ES + EN voices per professor or globally |
 | 4 | GPU availability | Pending | Affects Whisper + Ollama speed significantly |
-| 5 | Admin portal auth | Pending | Simple API key to start, upgrade to OAuth if needed |
-| 6 | Student auth | Pending | Institution SSO or simple email/password |
+| 5 | Admin auth | **In progress** | See [plan 02](docs/plans/02-auth-backend.md) |
+| 6 | Student auth | **In progress** | See [plan 03](docs/plans/03-auth-frontend.md) |
+| 7 | RAG source citations in frontend | **In progress** | See [plan 04](docs/plans/04-rag-visible.md) |
+| 8 | Production deployment | **Planned** | See [plan 08](docs/plans/08-deployment.md) |
 
 ---
 
@@ -510,21 +485,27 @@ Open `.env` and set at minimum:
 
 ---
 
-### Step 2 — Download Kokoro TTS model files
+### Step 2 — Pull Ollama models
 
-The Kokoro model files (~300 MB) must be downloaded once before starting the service.
+```bash
+# Pull the LLM and embedding models (one-time, ~2-4 GB)
+docker compose run --rm ollama ollama pull llama3.2
+docker compose run --rm ollama ollama pull nomic-embed-text
+```
+
+### Step 3 — Download Kokoro TTS model files (first time only)
 
 ```bash
 # Build the kokoro image first
 docker compose build kokoro
 
-# Download models into the named volume
+# Download models into the persistent volume
 docker compose run --rm kokoro python download_models.py
 ```
 
 ---
 
-### Step 3 — Start all services
+### Step 4 — Start all services
 
 # Development (auto-uses override.yml with hot-reload + debug ports)
 ```bash
@@ -546,18 +527,6 @@ docker compose logs -f backend
 The database tables are created automatically on first backend startup (SQLAlchemy `create_all`).
 
 ---
-
-### Step 4 — Pull LLM and embedding models into Ollama
-
-```bash
-# Main LLM — used for response generation and scope checking
-docker exec -it virtual_profesor-ollama-1 ollama pull llama3.2
-
-# Embedding model — used by the RAG pipeline
-docker exec -it virtual_profesor-ollama-1 ollama pull nomic-embed-text
-```
-
-> This downloads ~2–4 GB depending on the model. Run once; models are persisted in the `ollama_data` Docker volume.
 
 ---
 
@@ -696,10 +665,12 @@ Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-nat
 | Embeddings | Ollama nomic-embed-text |
 | RAG Framework | LlamaIndex |
 | Vector Database | Qdrant |
+| Reranker | BGE cross-encoder (local) |
 | Text-to-Speech | Kokoro TTS |
 | Backend | FastAPI (Python) |
 | Frontend | Next.js (TypeScript) |
 | Relational DB | PostgreSQL 16 |
 | Session Cache | Redis 7 |
+| Observability | Langfuse (self-hosted) |
 | Container | Docker Compose |
 | Reverse Proxy | Nginx |
