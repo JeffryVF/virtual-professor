@@ -1,7 +1,8 @@
 # ═══════════════════════════════════════════════════════════════
-# Virtual Professor — Production Overrides
+# Virtual Professor — Production Deployment
 # ═══════════════════════════════════════════════════════════════
-# Run with: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Production Docker Compose — use:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
 # Hardens the stack for production:
 #   - No port exposure for internal services
@@ -9,7 +10,70 @@
 #   - Health checks with depends_on conditions
 #   - Structured JSON logging
 #   - Restart policy: unless-stopped
+#   - Security options on all services
 # ═══════════════════════════════════════════════════════════════
+
+# ── Reusable logging anchor ────────────────────────────────────────────────
+x-default-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# ── Reusable security options ──────────────────────────────────────────────
+x-security: &security
+  security_opt:
+    - "no-new-privileges:true"
+
+# ── Resource limit presets ─────────────────────────────────────────────────
+#   light    – nginx, redis, kokoro, langfuse:         cpus 0.5, memory 512M
+#   medium   – backend, frontend:                       cpus 1,   memory 1G
+#   heavy    – postgres, qdrant:                        cpus 1,   memory 2G
+#   xheavy   – ollama, whisper:                         cpus 2,   memory 4G
+# ───────────────────────────────────────────────────────────────────────────
+
+x-light-limits: &light-limits
+  deploy:
+    resources:
+      limits:
+        cpus: "0.5"
+        memory: "512M"
+      reservations:
+        cpus: "0.1"
+        memory: "64M"
+
+x-medium-limits: &medium-limits
+  deploy:
+    resources:
+      limits:
+        cpus: "1"
+        memory: "1G"
+      reservations:
+        cpus: "0.25"
+        memory: "256M"
+
+x-heavy-limits: &heavy-limits
+  deploy:
+    resources:
+      limits:
+        cpus: "1"
+        memory: "2G"
+      reservations:
+        cpus: "0.25"
+        memory: "512M"
+
+x-xheavy-limits: &xheavy-limits
+  deploy:
+    resources:
+      limits:
+        cpus: "2"
+        memory: "4G"
+      reservations:
+        cpus: "0.5"
+        memory: "1G"
+
+# ── Services ───────────────────────────────────────────────────────────────
 
 services:
 
@@ -17,38 +81,22 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: "128M"
-        reservations:
-          cpus: "0.1"
-          memory: "64M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: [*light-limits, *default-logging, *security]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   frontend:
     environment:
       - NODE_ENV=production
       - DEBUG=false
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: "512M"
-        reservations:
-          cpus: "0.25"
-          memory: "256M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    expose:
+      - "3000"
+    <<: [*medium-limits, *default-logging, *security]
     restart: unless-stopped
     depends_on:
       backend:
@@ -57,20 +105,9 @@ services:
   backend:
     environment:
       - DEBUG=false
-    ports: []
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: "2G"
-        reservations:
-          cpus: "0.5"
-          memory: "512M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    expose:
+      - "8000"
+    <<: [*medium-limits, *default-logging, *security]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -85,20 +122,7 @@ services:
         condition: service_healthy
 
   whisper:
-    ports: []
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: "2G"
-        reservations:
-          cpus: "0.5"
-          memory: "1G"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: [*xheavy-limits, *default-logging, *security]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
@@ -108,43 +132,23 @@ services:
       start_period: 30s
 
   qdrant:
-    ports: []
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: "1G"
-        reservations:
-          cpus: "0.25"
-          memory: "256M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: [*heavy-limits, *default-logging, *security]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "http://localhost:6333/healthz",
+        ]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 10s
 
   kokoro:
-    ports: []
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: "1G"
-        reservations:
-          cpus: "0.25"
-          memory: "256M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: [*light-limits, *default-logging, *security]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8880/health"]
@@ -154,43 +158,18 @@ services:
       start_period: 30s
 
   postgres:
-    ports: []
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: "512M"
-        reservations:
-          cpus: "0.25"
-          memory: "256M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: [*heavy-limits, *default-logging, *security]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 30s
 
   redis:
-    ports: []
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: "128M"
-        reservations:
-          cpus: "0.1"
-          memory: "64M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: [*light-limits, *default-logging, *security]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -200,20 +179,7 @@ services:
       start_period: 5s
 
   langfuse-redis:
-    ports: []
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: "128M"
-        reservations:
-          cpus: "0.1"
-          memory: "64M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: [*light-limits, *default-logging, *security]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -223,38 +189,13 @@ services:
       start_period: 5s
 
   langfuse-postgres:
-    ports: []
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: "512M"
-        reservations:
-          cpus: "0.25"
-          memory: "256M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: [*heavy-limits, *default-logging, *security]
     restart: unless-stopped
 
   langfuse:
     ports:
       - "3001:3000"
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: "512M"
-        reservations:
-          cpus: "0.25"
-          memory: "256M"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    <<: [*light-limits, *default-logging, *security]
     restart: unless-stopped
     depends_on:
       langfuse-postgres:

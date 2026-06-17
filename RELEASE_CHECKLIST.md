@@ -38,14 +38,27 @@
 - [ ] `.env.example` has all required variables with descriptions
 - [ ] API changes documented in README endpoint table
 - [ ] Troubleshooting guide updated if RAG pipeline changed
+- [ ] `docs/deployment.md` updated for any infrastructure changes
 
 ## Deployment
 
-- [ ] `docker-compose.prod.yml` validated (or production compose config)
+- [ ] `docker-compose.prod.yml` validated with `docker compose config`
 - [ ] All services have healthchecks configured
 - [ ] Resource limits (CPU/memory) set for all services
+- [ ] `security_opt: ["no-new-privileges:true"]` present on all services
+- [ ] No internal service exposes ports (only nginx has `ports:`)
+- [ ] Nginx config validated: `docker compose exec nginx nginx -t`
 - [ ] Backup strategy confirmed (Postgres + Qdrant)
+- [ ] Backup script tested: `./scripts/backup.sh` runs without error
+- [ ] SSL certificate valid (not expired)
+- [ ] SSL auto-renewal cron job active: `crontab -l | grep certbot`
+- [ ] `CORS_ORIGINS` is locked to production domain (not `*`)
+- [ ] `JWT_SECRET_KEY` is a strong random value (not empty, not `changeme`)
+- [ ] `LIVEAVATAR_API_KEY` set to production key (not placeholder)
+- [ ] `LANGFUSE_ENABLE=true` set for observability
 - [ ] Never `docker compose down -v` without explicit backup
+- [ ] `client_max_body_size` is 55M (or correct for your use case)
+- [ ] Rate limiting zones configured in `config/nginx.conf`
 
 ## Smoke Test
 
@@ -64,3 +77,5 @@
 - [ ] Production environment updated
 - [ ] Langfuse traces verified for a test session
 - [ ] Backup of pre-release state confirmed
+- [ ] Monitoring dashboards checked for anomalies
+- [ ] SSL renewal tested: `certbot renew --dry-run`
