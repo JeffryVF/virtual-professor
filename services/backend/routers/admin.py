@@ -1,16 +1,17 @@
+import logging
 import os
 import shutil
 import uuid
 from uuid import UUID
 
 import magic
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Security, UploadFile
-from fastapi.security import APIKeyHeader
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_db
+from dependencies.auth import verify_admin_or_deprecated_key
 from models.db import Document, DocumentStatus, Message, Professor
 from models.db import Session as DBSession
 from models.schemas import (
@@ -22,6 +23,8 @@ from models.schemas import (
     SessionResponse,
 )
 from services.ingestion import delete_document_chunks, delete_qdrant_collection, ingest_document
+
+log = logging.getLogger(__name__)
 
 # Structured error codes for pre-upload validation
 # Maps error_code -> (http_status, default_message)
@@ -99,21 +102,13 @@ router = APIRouter()
 
 UPLOAD_DIR = "/app/uploads"
 
-_admin_key_scheme = APIKeyHeader(name="X-Admin-Key", auto_error=True)
-
-
-async def verify_admin(api_key: str = Security(_admin_key_scheme)):
-    if api_key != settings.admin_api_key:
-        raise HTTPException(status_code=403, detail="Invalid admin key")
-
-
 # ── Professors ────────────────────────────────────────────────────────────────
 
 @router.post("/professors", response_model=ProfessorResponse, status_code=201)
 async def create_professor(
     data: ProfessorCreate,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     collection = f"prof_{uuid.uuid4().hex[:12]}"
     professor = Professor(**data.model_dump(), collection=collection)
@@ -126,7 +121,7 @@ async def create_professor(
 @router.get("/professors", response_model=list[ProfessorResponse])
 async def list_professors(
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     result = await db.execute(select(Professor))
     return result.scalars().all()
@@ -136,7 +131,7 @@ async def list_professors(
 async def get_professor(
     professor_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     result = await db.execute(select(Professor).where(Professor.id == professor_id))
     prof = result.scalar_one_or_none()
@@ -150,7 +145,7 @@ async def update_professor(
     professor_id: UUID,
     data: ProfessorUpdate,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     result = await db.execute(select(Professor).where(Professor.id == professor_id))
     prof = result.scalar_one_or_none()
@@ -167,7 +162,7 @@ async def update_professor(
 async def delete_professor(
     professor_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     result = await db.execute(select(Professor).where(Professor.id == professor_id))
     prof = result.scalar_one_or_none()
@@ -186,7 +181,7 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     result = await db.execute(select(Professor).where(Professor.id == professor_id))
     prof = result.scalar_one_or_none()
@@ -235,7 +230,7 @@ async def upload_document(
 async def list_documents(
     professor_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     result = await db.execute(select(Document).where(Document.professor_id == professor_id))
     return result.scalars().all()
@@ -245,7 +240,7 @@ async def list_documents(
 async def delete_document(
     document_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     result = await db.execute(select(Document).where(Document.id == document_id))
     doc = result.scalar_one_or_none()
@@ -265,7 +260,7 @@ async def delete_document(
 @router.get("/sessions", response_model=list[SessionResponse])
 async def list_sessions(
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     result = await db.execute(select(DBSession).order_by(DBSession.started_at.desc()))
     return result.scalars().all()
@@ -275,7 +270,7 @@ async def list_sessions(
 async def session_history(
     session_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: None = Depends(verify_admin),
+    _ = Depends(verify_admin_or_deprecated_key),
 ):
     result = await db.execute(
         select(Message)

@@ -13,6 +13,12 @@ aiofiles>=24.0.0
 python-magic>=0.4.27
 PyMuPDF>=0.25.0
 
+# Auth
+pyjwt>=2.8.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0
+aiosqlite>=0.20.0
+
 # RAG
 llama-index-core>=0.10.0
 llama-index-vector-stores-qdrant>=0.2.0

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
 from core.database import engine
 from models.db import Base
-from routers import admin, professors, sessions
+from routers import admin, auth, professors, sessions
 from services import langfuse as langfuse_service
 
 logging.basicConfig(
@@ -62,6 +62,7 @@ app.add_middleware(
 
 app.include_router(professors.router, prefix="/professors", tags=["professors"])
 app.include_router(sessions.router, prefix="/sessions", tags=["sessions"])
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 

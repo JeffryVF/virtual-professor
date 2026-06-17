@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Admin
     admin_api_key: str
 
+    # JWT
+    jwt_secret_key: str
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 30
+    jwt_refresh_token_expire_days: int = 7
+
     # Session settings
     session_memory_messages: int = 10
     session_memory_max_tokens: int = 4096
