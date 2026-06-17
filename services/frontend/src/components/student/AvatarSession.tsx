@@ -6,8 +6,10 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { connectLiveAvatar, speakInSession, getSessionHistory, endSession } from '@/lib/api'
+import type { Source } from '@/app/session/ChatBubble'
+import ChatBubble from '@/app/session/ChatBubble'
 
-interface Message { role: string; content: string; timestamp: string }
+interface Message { role: string; content: string; timestamp: string; sources?: Source[] }
 
 interface Props {
   sessionId: string
@@ -288,18 +290,10 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
           {history.length === 0
             ? <p className="text-muted-foreground text-xs text-center mt-8">No messages yet.</p>
             : history.map((msg) => (
-                <div
+                <ChatBubble
                   key={msg.timestamp}
-                  className={cn(
-                    'rounded-lg px-3 py-2 max-w-full',
-                    msg.role === 'student'
-                      ? 'bg-primary/10 text-right ml-4'
-                      : 'bg-muted mr-4'
-                  )}
-                >
-                  <p className="text-xs font-medium text-muted-foreground mb-0.5 capitalize">{msg.role}</p>
-                  <p>{msg.content}</p>
-                </div>
+                  message={{ id: msg.timestamp, ...msg }}
+                />
               ))
           }
         </div>

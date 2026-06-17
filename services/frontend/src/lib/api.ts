@@ -139,6 +139,53 @@ export const deleteDocument = async (documentId: string): Promise<void> => {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
 }
 
+// ── RAG / Indexing ────────────────────────────────────────────────────────────
+
+export interface ChunkResponse {
+  chunk_index: number
+  text: string
+  score: number | null
+  page_number: string | null
+}
+
+export interface CollectionStatus {
+  professor_id: string
+  professor_name: string
+  collection: string
+  total_documents: number
+  documents_by_status: Record<string, number>
+  total_chunks: number
+  qdrant_points: number
+  last_indexed_at: string | null
+  last_error: string | null
+}
+
+export interface IndexingStatusResponse {
+  collections: CollectionStatus[]
+  summary: {
+    total_collections: number
+    total_documents: number
+    total_chunks: number
+    collections_with_errors: number
+  }
+}
+
+export const getIndexingStatus = () =>
+  authRequest<IndexingStatusResponse>('/admin/indexing/status')
+
+export const getDocumentChunks = (documentId: string, offset?: number, limit?: number) => {
+  const params = new URLSearchParams()
+  if (offset !== undefined) params.set('offset', String(offset))
+  if (limit !== undefined) params.set('limit', String(limit))
+  const qs = params.toString()
+  return authRequest<ChunkResponse[]>(`/admin/documents/${documentId}/chunks${qs ? `?${qs}` : ''}`)
+}
+
+export const reindexDocument = (documentId: string) =>
+  authRequest<{ status: string; document_id: string }>(`/admin/documents/${documentId}/reindex`, {
+    method: 'POST',
+  })
+
 // ── Students & Sessions ───────────────────────────────────────────────────────
 
 export const createStudent = (name: string, language: Language) => {
