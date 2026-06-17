@@ -2,11 +2,13 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from core.database import get_db
+from core.rate_limit import limiter
 from dependencies.auth import (
     create_access_token,
     create_refresh_token,
@@ -21,11 +23,17 @@ from models.user import RefreshToken, User
 
 log = logging.getLogger(__name__)
 
+# Rate limits: very high in debug/test mode, restricted otherwise
+_LOGIN_LIMIT = "10000/minute" if settings.debug else "5/minute"
+_REFRESH_LIMIT = "10000/minute" if settings.debug else "3/minute"
+_REGISTER_LIMIT = "10000/minute" if settings.debug else "2/minute"
+
 router = APIRouter()
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
+@limiter.limit(_REGISTER_LIMIT)
+async def register(request: Request, data: UserCreate, db: AsyncSession = Depends(get_db)):
     """Register a new user."""
     # Check duplicate email
     result = await db.execute(select(User).where(User.email == data.email))
@@ -47,7 +55,8 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit(_LOGIN_LIMIT)
+async def login(request: Request, data: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Authenticate user and return JWT tokens."""
     result = await db.execute(select(User).where(User.email == data.email))
     user = result.scalar_one_or_none()
@@ -73,7 +82,8 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh(data: RefreshRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit(_REFRESH_LIMIT)
+async def refresh(request: Request, data: RefreshRequest, db: AsyncSession = Depends(get_db)):
     """Exchange a refresh token for a new token pair."""
     token_hash_value = hash_token(data.refresh_token)
 

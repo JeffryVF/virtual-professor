@@ -4,6 +4,7 @@ from uuid import UUID
 import httpx
 
 from core.config import settings
+from core.utils import mask_sensitive
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +40,11 @@ async def create_session_token(avatar_id: str) -> dict:
                 "is_sandbox": settings.liveavatar_sandbox,
             },
         )
-        log.info("token response %s: %s", response.status_code, response.text)
+        log.info(
+            "token response %s (length=%s)",
+            response.status_code,
+            len(response.text),
+        )
         response.raise_for_status()
         return response.json()["data"]
 
@@ -54,7 +59,11 @@ async def start_session(session_token: str) -> dict:
             f"{settings.liveavatar_api_url}/v1/sessions/start",
             headers={"Authorization": f"Bearer {session_token}"},
         )
-        log.info("start response %s: %s", response.status_code, response.text)
+        log.info(
+            "start response %s (length=%s)",
+            response.status_code,
+            len(response.text),
+        )
         response.raise_for_status()
         return response.json()["data"]
 

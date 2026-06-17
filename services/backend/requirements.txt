@@ -19,6 +19,9 @@ passlib[bcrypt]>=1.7.4
 bcrypt>=4.0.0
 aiosqlite>=0.20.0
 
+# Rate limiting
+slowapi>=0.1.9
+
 # RAG
 llama-index-core>=0.10.0
 llama-index-vector-stores-qdrant>=0.2.0

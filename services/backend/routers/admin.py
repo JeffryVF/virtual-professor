@@ -196,6 +196,32 @@ async def upload_document(
     if not prof:
         raise HTTPException(status_code=404, detail="Professor not found")
 
+    # ── Document count limit ────────────────────────────────────────────────
+    count_result = await db.execute(
+        select(func.count(Document.id)).where(Document.professor_id == professor_id)
+    )
+    doc_count = count_result.scalar() or 0
+    if doc_count >= settings.professor_max_documents:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Professor already has {doc_count} documents (max: {settings.professor_max_documents}). "
+            f"Remove existing documents before uploading new ones.",
+        )
+
+    # ── Processing check ───────────────────────────────────────────────────
+    processing_result = await db.execute(
+        select(Document.id).where(
+            Document.professor_id == professor_id,
+            Document.status == DocumentStatus.processing,
+        ).limit(1)
+    )
+    if processing_result.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another document is currently being processed for this professor. "
+            "Wait for processing to complete before uploading another.",
+        )
+
     # Pre-upload validation
     allowed = settings.upload_allowed_formats.split(",")
     is_valid, err_code, err_msg = validate_upload_file(
