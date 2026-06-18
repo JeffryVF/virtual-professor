@@ -30,6 +30,9 @@ node_modules/
 .coverage
 *.db
 
+# ── Tool caches ────────────────────────────────────────────────
+.atl/.skill-registry.cache.json
+
 # ── OS ─────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
