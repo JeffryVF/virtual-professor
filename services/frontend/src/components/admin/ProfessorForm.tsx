@@ -15,11 +15,13 @@ interface Props {
   onSaved: (p: Professor) => void
 }
 
+const DEFAULT_AVATAR_ID = '65f9e3c9-d48b-4118-b73a-4ae2e3cbb8f0'
+
 const empty: ProfessorCreate = {
   name: '',
   topic: '',
   language: 'both',
-  avatar_id: '',
+  avatar_id: DEFAULT_AVATAR_ID,
   system_prompt: '',
 }
 

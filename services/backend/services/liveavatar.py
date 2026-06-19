@@ -68,6 +68,23 @@ async def start_session(session_token: str) -> dict:
         return response.json()["data"]
 
 
+async def stop_session(session_id: str, reason: str = "USER_CLOSED") -> dict:
+    """POST /v1/sessions/stop to close an active LiveAvatar session."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            f"{settings.liveavatar_api_url}/v1/sessions/stop",
+            headers={"X-API-KEY": settings.liveavatar_api_key},
+            json={"session_id": session_id, "reason": reason},
+        )
+        log.info(
+            "stop response %s (length=%s)",
+            response.status_code,
+            len(response.text),
+        )
+        response.raise_for_status()
+        return response.json()["data"]
+
+
 async def create_embed_session(avatar_id: str) -> dict:
     """Legacy embed helper (kept for reference)."""
     avatar_id = _normalize_avatar_id(avatar_id)

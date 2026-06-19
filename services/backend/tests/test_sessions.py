@@ -231,6 +231,106 @@ async def test_speak_no_langfuse_errors_when_disabled(
 
 
 @pytest.mark.asyncio
+async def test_speak_persists_full_response_but_sends_shorter_text_to_tts(
+    async_app, async_client, test_professor, db_session
+):
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "Long Response Student", "email": "long-response@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = UUID(session_resp.json()["id"])
+    long_response = " ".join(["This is a detailed explanation about science."] * 80)
+
+    with (
+        patch("routers.sessions.rag") as mock_rag,
+        patch("routers.sessions.llm") as mock_llm_module,
+        patch("routers.sessions.stt") as mock_stt,
+        patch("routers.sessions.tts") as mock_tts,
+        patch("routers.sessions.memory") as mock_memory,
+    ):
+        mock_stt.transcribe = AsyncMock(return_value="Explain photosynthesis")
+        mock_llm_module.is_in_scope = AsyncMock(return_value=True)
+        mock_llm_module.generate_response = AsyncMock(return_value=long_response)
+        mock_rag.retrieve_context = AsyncMock(return_value=[])
+        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_memory.get_history = AsyncMock(return_value=[])
+        mock_memory.append_message = AsyncMock()
+
+        audio_file = io.BytesIO(b"fake audio bytes")
+        response = await async_client.post(
+            f"/sessions/{session_id}/speak",
+            files={"audio": ("test.wav", audio_file, "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    speech_text = mock_tts.synthesize.call_args.args[0]
+    assert len(speech_text) < len(long_response)
+    assert speech_text.endswith("I can continue with more details if you want.")
+
+    async with AsyncSessionLocal() as check_session:
+        result = await check_session.execute(
+            select(Message).where(Message.session_id == session_id).order_by(Message.timestamp)
+        )
+        messages = result.scalars().all()
+
+    professor_messages = [message for message in messages if message.role.value == "professor"]
+    assert professor_messages[-1].content == long_response
+
+
+@pytest.mark.asyncio
+async def test_speak_returns_text_only_json_when_tts_fails(
+    async_app, async_client, test_professor, db_session
+):
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "TTS Failure Student", "email": "tts-failure@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = UUID(session_resp.json()["id"])
+    response_text = "The professor answer is still available as text."
+
+    with (
+        patch("routers.sessions.rag") as mock_rag,
+        patch("routers.sessions.llm") as mock_llm_module,
+        patch("routers.sessions.stt") as mock_stt,
+        patch("routers.sessions.tts") as mock_tts,
+        patch("routers.sessions.memory") as mock_memory,
+    ):
+        mock_stt.transcribe = AsyncMock(return_value="Explain gravity")
+        mock_llm_module.is_in_scope = AsyncMock(return_value=True)
+        mock_llm_module.generate_response = AsyncMock(return_value=response_text)
+        mock_rag.retrieve_context = AsyncMock(return_value=[])
+        mock_tts.synthesize = AsyncMock(side_effect=RuntimeError("tts unavailable"))
+        mock_memory.get_history = AsyncMock(return_value=[])
+        mock_memory.append_message = AsyncMock()
+
+        audio_file = io.BytesIO(b"fake audio bytes")
+        response = await async_client.post(
+            f"/sessions/{session_id}/speak",
+            files={"audio": ("test.wav", audio_file, "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"text": response_text, "audio": None}
+
+
+@pytest.mark.asyncio
 async def test_speak_creates_trace_when_langfuse_enabled(
     async_app, async_client, test_professor, db_session
 ):

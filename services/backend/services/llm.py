@@ -54,6 +54,13 @@ async def generate_response(
         "No inventes fuentes para fragmentos sin etiqueta."
     )
 
+    conciseness_instruction = (
+        "Responde de forma breve y directa, idealmente 1 a 3 frases. "
+        "Tu respuesta se usará para síntesis de voz, así que debe ser "
+        "concisa y natural al hablar. Si el estudiante pide más detalles, "
+        "puedes ampliar, pero por defecto sé breve."
+    )
+
     input_tokens = estimate_tokens(prompt) + estimate_tokens(system_prompt)
 
     # ── Langfuse span ────────────────────────────────────────────────────
@@ -62,24 +69,26 @@ async def generate_response(
 
         async with create_span(trace, "llm_generate") as span:
             try:
-                async with httpx.AsyncClient(timeout=120) as client:
-                    response = await client.post(
-                        f"{settings.ollama_url}/api/generate",
-                        json={
-                            "model": settings.ollama_llm_model,
-                            "system": (
-                                f"{system_prompt}\n\n"
-                                f"Use the following knowledge to answer the student's question. "
-                                f"If the answer is not in the knowledge, say you don't have that information.\n\n"
-                                f"{citation_instruction}"
-                            ),
-                            "prompt": prompt,
-                            "stream": False,
-                        },
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    output_text = data["response"]
+                    async with httpx.AsyncClient(timeout=300) as client:
+                        response = await client.post(
+                            f"{settings.ollama_url}/api/generate",
+                            json={
+                                "model": settings.ollama_llm_model,
+                                "system": (
+                                    f"{system_prompt}\n\n"
+                                    f"Use the following knowledge to answer the student's question. "
+                                    f"If the answer is not in the knowledge, say you don't have that information.\n\n"
+                                    f"{citation_instruction}\n\n"
+                                    f"{conciseness_instruction}"
+                                ),
+                                "prompt": prompt,
+                                "stream": False,
+                                "options": {"num_predict": settings.llm_max_tokens},
+                            },
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        output_text = data["response"]
             except Exception as exc:
                 if span is not None:
                     span.update(level="ERROR", status_message=str(exc))
@@ -95,7 +104,7 @@ async def generate_response(
                 )
             return output_text
 
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=300) as client:
         response = await client.post(
             f"{settings.ollama_url}/api/generate",
             json={
@@ -104,10 +113,12 @@ async def generate_response(
                     f"{system_prompt}\n\n"
                     f"Use the following knowledge to answer the student's question. "
                     f"If the answer is not in the knowledge, say you don't have that information.\n\n"
-                    f"{citation_instruction}"
+                    f"{citation_instruction}\n\n"
+                    f"{conciseness_instruction}"
                 ),
                 "prompt": prompt,
                 "stream": False,
+                "options": {"num_predict": settings.llm_max_tokens},
             },
         )
         response.raise_for_status()

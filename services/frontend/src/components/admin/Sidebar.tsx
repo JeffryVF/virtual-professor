@@ -1,8 +1,9 @@
 'use client'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { GraduationCap, BookOpen, LayoutDashboard, FileText, Activity } from 'lucide-react'
+import { GraduationCap, BookOpen, LayoutDashboard, FileText, Activity, LogOut } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useAuth } from '@/contexts/AuthContext'
 
 const links = [
   { href: '/admin', label: 'Dashboard', icon: LayoutDashboard, exact: true },
@@ -13,6 +14,7 @@ const links = [
 
 export default function Sidebar() {
   const pathname = usePathname()
+  const { logout } = useAuth()
 
   return (
     <aside className="w-60 shrink-0 border-r bg-white flex flex-col">
@@ -40,7 +42,15 @@ export default function Sidebar() {
           )
         })}
       </nav>
-      <div className="px-6 py-4 border-t text-xs text-muted-foreground">Admin Portal</div>
+      <div className="border-t p-3">
+        <button
+          onClick={logout}
+          className="flex w-full items-center gap-3 rounded-md bg-black px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-gray-800"
+        >
+          <LogOut className="h-4 w-4" />
+          Cerrar sesión
+        </button>
+      </div>
     </aside>
   )
 }

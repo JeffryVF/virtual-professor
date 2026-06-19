@@ -51,7 +51,10 @@ async def create_refresh_token(user_id: str, db: AsyncSession) -> str:
     """Persist a new RefreshToken row and return the raw token string."""
     raw_token = str(uuid.uuid4())
     token_hash_value = hash_token(raw_token)
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    # RefreshToken.expires_at is stored in a TIMESTAMP WITHOUT TIME ZONE column.
+    # asyncpg rejects timezone-aware datetimes for that column, so persist a
+    # naive UTC value and re-attach UTC when comparing during refresh.
+    expires_at = datetime.utcnow() + timedelta(
         days=settings.jwt_refresh_token_expire_days
     )
 

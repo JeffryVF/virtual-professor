@@ -67,18 +67,23 @@ def _convert_to_wav(audio_bytes: bytes) -> bytes:
             return output_file.read()
 
 
+_MIN_AUDIO_BYTES_DIRECT = 128  # minimum raw bytes before sending to Whisper
+
+
 async def transcribe(audio_bytes: bytes, language: str | None = None) -> str:
-    """Send audio to Whisper and return the transcript text."""
-    params: dict = {"task": "transcribe", "output": "txt"}
+    """Send audio directly to Whisper (letting it handle ffmpeg conversion)."""
+    if not audio_bytes or len(audio_bytes) < _MIN_AUDIO_BYTES_DIRECT:
+        log.warning("Audio too small (%d bytes), skipping transcription", len(audio_bytes) if audio_bytes else 0)
+        return ""
+
+    params: dict = {"task": "transcribe", "output": "txt", "encode": "true"}
     if language:
         params["language"] = language
-
-    wav_bytes = await asyncio.to_thread(_convert_to_wav, audio_bytes)
 
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
             f"{settings.whisper_url}/asr",
-            files={"audio_file": ("audio.wav", wav_bytes, "audio/wav")},
+            files={"audio_file": ("audio.webm", audio_bytes, "application/octet-stream")},
             params=params,
         )
         response.raise_for_status()

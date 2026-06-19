@@ -21,11 +21,14 @@ class DocumentStatusEnum(str, Enum):
 
 # ── Professor ────────────────────────────────────────────────────────────────
 
+_DEFAULT_AVATAR_ID = "65f9e3c9-d48b-4118-b73a-4ae2e3cbb8f0"
+
+
 class ProfessorCreate(BaseModel):
     name: str
     topic: str
     language: LanguageEnum
-    avatar_id: str
+    avatar_id: str = _DEFAULT_AVATAR_ID
     system_prompt: str
 
 

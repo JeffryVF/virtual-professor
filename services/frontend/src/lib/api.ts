@@ -46,6 +46,7 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   }
 
   let res = await fetch(`${API_BASE}${path}`, { ...init, headers })
+  console.info('[api] request finished', { path, method: init?.method ?? 'GET', status: res.status })
 
   if (res.status === 401) {
     const refreshed = await refreshTokens()
@@ -53,12 +54,17 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
       const retryHeaders = new Headers(init?.headers)
       retryHeaders.set('Authorization', `Bearer ${refreshed.access_token}`)
       res = await fetch(`${API_BASE}${path}`, { ...init, headers: retryHeaders })
+      console.info('[api] request retry finished', { path, method: init?.method ?? 'GET', status: res.status })
     } else {
       clearTokens()
+      console.warn('[api] auth expired', { path, method: init?.method ?? 'GET' })
       if (typeof window !== 'undefined') {
         window.location.href = '/login?expired=true'
       }
-      throw new Error('Session expired')
+      const error = new Error('Tu sesión expiró. Inicia sesión nuevamente.') as Error & { status?: number; detail?: string }
+      error.status = 401
+      error.detail = 'Tu sesión expiró. Inicia sesión nuevamente.'
+      throw error
     }
   }
 
@@ -75,6 +81,14 @@ async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ── Professors ────────────────────────────────────────────────────────────────
 
+/** Public endpoint — no auth required. Used by the student portal. */
+export async function getPublicProfessors(): Promise<Professor[]> {
+  const res = await fetch(`${API_BASE}/professors`)
+  if (!res.ok) throw await handleApiError(res)
+  return res.json()
+}
+
+/** Admin endpoint — requires auth. Used by the admin panel. */
 export const getProfessors = () => authRequest<Professor[]>('/admin/professors')
 
 export const createProfessor = (data: ProfessorCreate) =>
@@ -209,6 +223,13 @@ export const connectLiveAvatar = (sessionId: string) =>
     method: 'POST',
   })
 
+export const stopLiveAvatarSession = (sessionId: string, liveavatarSessionId: string, reason = 'USER_CLOSED') =>
+  authRequest<{ status: string; liveavatar_session_id?: string }>(`/sessions/${sessionId}/liveavatar-stop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ liveavatar_session_id: liveavatarSessionId, reason }),
+  })
+
 export const getSessionHistory = (sessionId: string) =>
   authRequest<Array<{ id: string; role: string; content: string; timestamp: string }>>(
     `/sessions/${sessionId}/history`
@@ -219,7 +240,11 @@ export const endSession = async (sessionId: string): Promise<void> => {
   if (!res.ok) throw await handleApiError(res)
 }
 
-export async function speakInSession(sessionId: string, audio: Blob): Promise<ArrayBuffer> {
+export type SpeakResult =
+  | { kind: 'audio'; buffer: ArrayBuffer }
+  | { kind: 'text-only'; text: string }
+
+export async function speakInSession(sessionId: string, audio: Blob): Promise<SpeakResult> {
   const form = new FormData()
   form.append('audio', audio, 'recording')
   const res = await authFetch(`/sessions/${sessionId}/speak`, {
@@ -227,5 +252,12 @@ export async function speakInSession(sessionId: string, audio: Blob): Promise<Ar
     body: form,
   })
   if (!res.ok) throw await handleApiError(res)
-  return res.arrayBuffer()
+
+  const contentType = res.headers.get('Content-Type') ?? ''
+  if (contentType.includes('application/json')) {
+    const body = await res.json() as { text?: string }
+    return { kind: 'text-only', text: body.text ?? '' }
+  }
+
+  return { kind: 'audio', buffer: await res.arrayBuffer() }
 }

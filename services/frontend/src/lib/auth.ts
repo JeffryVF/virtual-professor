@@ -29,6 +29,20 @@ interface LoginResponse {
   user: AuthUser
 }
 
+async function authError(res: Response, fallback: string): Promise<Error> {
+  const body = await res.json().catch(() => null)
+  const detail = body?.detail
+  const error = body?.error
+
+  let message = fallback
+  if (typeof detail === 'string') message = detail
+  else if (Array.isArray(detail) && detail[0]?.msg) message = detail[0].msg
+  else if (typeof error === 'string') message = error
+  else if (typeof error?.message === 'string') message = error.message
+
+  return new Error(message)
+}
+
 // ── Token storage ─────────────────────────────────────────────────────────────
 
 const ACCESS_KEY = 'vp_access_token'
@@ -63,8 +77,7 @@ export async function login(credentials: LoginCredentials): Promise<{ user: Auth
     body: JSON.stringify(credentials),
   })
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: 'Login failed' }))
-    throw new Error(body.detail ?? 'Login failed')
+    throw await authError(res, 'Login failed')
   }
   const data: LoginResponse = await res.json()
   storeTokens(data)
@@ -74,15 +87,14 @@ export async function login(credentials: LoginCredentials): Promise<{ user: Auth
   }
 }
 
-export async function register(data: { email: string; password: string; name: string }): Promise<AuthUser> {
+export async function register(data: { email: string; password: string; name: string; role?: string }): Promise<AuthUser> {
   const res = await fetch(`${API_BASE}/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
+      body: JSON.stringify({ ...data, role: data.role ?? 'student' }),
   })
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ detail: 'Registration failed' }))
-    throw new Error(body.detail ?? 'Registration failed')
+    throw await authError(res, 'Registration failed')
   }
   return res.json()
 }

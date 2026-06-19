@@ -124,7 +124,7 @@ services:
       retries: 5
 
   langfuse:
-    image: langfuse/langfuse:latest
+    image: langfuse/langfuse:2
     depends_on:
       langfuse-postgres:
         condition: service_healthy

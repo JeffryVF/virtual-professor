@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     ollama_url: str
     ollama_llm_model: str = "llama3.2"
     ollama_embed_model: str = "nomic-embed-text"
+    llm_max_tokens: int = 350  # max tokens per LLM response (env: LLM_MAX_TOKENS)
 
     # Whisper
     whisper_url: str
@@ -77,7 +78,7 @@ class Settings(BaseSettings):
     langfuse_host: str = "https://cloud.langfuse.com"
     langfuse_release: str = "0.1.0"
 
-    # CORS — comma-separated origins, or "*" for development
+    # CORS — JSON array, comma-separated, or "*" for development
     cors_origins: list[str] = ["*"]
 
     @field_validator("cors_origins", mode="before")
@@ -86,9 +87,9 @@ class Settings(BaseSettings):
         """Parse CORS_ORIGINS from env: accepts JSON array, comma-separated, or '*'.
 
         Examples:
-          CORS_ORIGINS=*                       → ["*"]
-          CORS_ORIGINS=https://a.com,http://b  → ["https://a.com", "http://b"]
-          CORS_ORIGINS='["https://a.com"]'     → ["https://a.com"]
+          CORS_ORIGINS=["*"]                  → ["*"]
+          CORS_ORIGINS=https://a.com,http://b → ["https://a.com", "http://b"]
+          CORS_ORIGINS=["https://a.com"]      → ["https://a.com"]
         """
         if isinstance(value, list):
             return value

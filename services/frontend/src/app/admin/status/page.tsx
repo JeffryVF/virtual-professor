@@ -4,17 +4,18 @@ import { useCallback, useEffect, useState, useRef } from 'react'
 import { RefreshCw, Activity, AlertCircle, CheckCircle, XCircle } from 'lucide-react'
 import { handleApiError } from '@/lib/error-handler'
 
-interface ServiceStatus {
-  name: string
+interface ServiceProbe {
   status: 'healthy' | 'degraded' | 'unhealthy'
   latency_ms: number | null
   error: string | null
 }
 
+/** Response shape from GET /health */
 interface HealthResponse {
   status: 'healthy' | 'degraded'
-  services: ServiceStatus[]
-  checked_at: string
+  timestamp: string
+  services: Record<string, ServiceProbe>
+  version: string
 }
 
 type FetchState =
@@ -22,8 +23,16 @@ type FetchState =
   | { kind: 'error'; message: string }
   | { kind: 'loaded'; data: HealthResponse }
 
-function StatusDot({ status }: { status: ServiceStatus['status'] }) {
-  const colors: Record<ServiceStatus['status'], string> = {
+const serviceNameLabels: Record<string, string> = {
+  postgres: 'PostgreSQL',
+  redis: 'Redis',
+  qdrant: 'Qdrant',
+  ollama: 'Ollama (LLM)',
+  kokoro: 'Kokoro (TTS)',
+}
+
+function StatusDot({ status }: { status: ServiceProbe['status'] }) {
+  const colors: Record<ServiceProbe['status'], string> = {
     healthy: 'bg-green-500',
     degraded: 'bg-yellow-500',
     unhealthy: 'bg-red-500',
@@ -161,38 +170,38 @@ export default function AdminStatusPage() {
             <StatusBadge status={state.data.status} />
             <span className="text-sm text-muted-foreground">
               &Uacute;ltima verificaci&oacute;n:{' '}
-              {new Date(state.data.checked_at).toLocaleString('es-CR')}
+               {new Date(state.data.timestamp).toLocaleString('es-CR')}
             </span>
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {state.data.services.map(service => (
+            {Object.entries(state.data.services).map(([name, probe]) => (
               <div
-                key={service.name}
+                key={name}
                 className="rounded-lg border bg-card p-5 shadow-sm"
               >
                 <div className="flex items-center gap-2 mb-3">
                   <Activity className="h-4 w-4 text-muted-foreground" />
-                  <h3 className="font-medium text-sm">{service.name}</h3>
+                  <h3 className="font-medium text-sm">{serviceNameLabels[name] ?? name}</h3>
                 </div>
                 <div className="space-y-1.5 text-sm">
                   <div className="flex items-center gap-2">
-                    <StatusDot status={service.status} />
+                    <StatusDot status={probe.status} />
                     <span className="capitalize text-muted-foreground">
-                      {service.status === 'healthy'
+                      {probe.status === 'healthy'
                         ? 'Saludable'
-                        : service.status === 'degraded'
+                        : probe.status === 'degraded'
                           ? 'Degradado'
                           : 'No disponible'}
                     </span>
                   </div>
-                  {service.latency_ms !== null && (
+                  {probe.latency_ms !== null && (
                     <p className="text-muted-foreground">
-                  Latencia: <span className="font-medium tabular-nums">{service.latency_ms}ms</span>
+                  Latencia: <span className="font-medium tabular-nums">{probe.latency_ms}ms</span>
                     </p>
                   )}
-                  {service.error && (
-                    <p className="text-xs text-destructive">{service.error}</p>
+                  {probe.error && (
+                    <p className="text-xs text-destructive">{probe.error}</p>
                   )}
                 </div>
               </div>
