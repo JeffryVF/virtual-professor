@@ -160,6 +160,8 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
   const connectionStageRef = useRef<ConnectionStage>('idle')
   const liveavatarSessionIdRef = useRef<string | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
+  const keepAliveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const wsReconnectAttemptedRef = useRef(false)
 
   const [status, setStatus] = useState<Status>('connecting')
   const [recording, setRecording] = useState(false)
@@ -277,14 +279,18 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
             roomId: creds.liveavatar_session_id,
             stage: connectionStageRef.current,
             readyState: ws.readyState,
+            url: creds.ws_url?.replace(/\/[^/]+$/, '/...'),
           })
         }
-        ws.onclose = () => {
+        ws.onclose = (event: CloseEvent) => {
           if (cancelledRef.current || statusRef.current === 'error') return
           console.warn('[LiveAvatar] WebSocket closed', {
             sessionId,
             roomId: creds.liveavatar_session_id,
             stage: connectionStageRef.current,
+            code: event.code,
+            reason: event.reason,
+            wasClean: event.wasClean,
             readyState: ws.readyState,
           })
           if (connectionStageRef.current === 'ws-validating') {
@@ -315,6 +321,13 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
           connected: true,
         })
         connectionStageRef.current = 'ready'
+
+        // Start keep-alive to prevent 5-min inactivity timeout
+        keepAliveIntervalRef.current = setInterval(() => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'session.keep_alive' }))
+          }
+        }, 120_000)
 
         if (cancelledRef.current) {
           room.disconnect()
@@ -402,8 +415,8 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
       updateStatus('error')
     } finally {
       isConnectingRef.current = false
-      // Only reset stage if cleanup() wasn't already called (which sets 'stopping')
-      if (connectionStageRef.current !== 'stopping') {
+      // Don't reset stage if cleanup() already ran (sets 'stopping')
+      if ((connectionStageRef.current as string) !== 'stopping') {
         connectionStageRef.current = 'idle'
       }
     }
@@ -454,6 +467,11 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
     if (connectionStageRef.current === 'stopping') return  // idempotent
     connectionStageRef.current = 'stopping'
     console.info('[LiveAvatar] cleanup starting', { sessionId, hadRoom: Boolean(roomRef.current), hadWs: Boolean(wsRef.current), hadRecorder: Boolean(recorderRef.current), hadMediaStream: Boolean(mediaStreamRef.current) })
+
+    if (keepAliveIntervalRef.current) {
+      clearInterval(keepAliveIntervalRef.current)
+      keepAliveIntervalRef.current = null
+    }
 
     roomRef.current?.disconnect()
     roomRef.current = null
