@@ -31,11 +31,13 @@ class Settings(BaseSettings):
 
     # Kokoro TTS
     kokoro_url: str
+    tts_chunk_max_chars: int = 700  # max chars per TTS chunk when splitting
+    tts_max_total_chars: int = 6000  # max total chars to synthesize — longer text is truncated gracefully
 
     # LiveAvatar
     liveavatar_api_key: str
     liveavatar_api_url: str
-    liveavatar_sandbox: bool = True
+    liveavatar_sandbox: bool = False
 
     # Admin
     admin_api_key: str

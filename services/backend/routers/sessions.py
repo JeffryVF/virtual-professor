@@ -9,6 +9,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from core.database import get_db
 from models.db import Language, Message, MessageRole, Professor, Student, ThresholdNotification
 from models.db import Session as DBSession
@@ -71,29 +72,25 @@ def _map_stt_language(lang) -> str | None:
     return _STT_LANGUAGE_MAP.get(lang)
 
 
-def _prepare_speech_text(text: str, max_chars: int = 1200) -> str:
-    if len(text) <= max_chars:
-        return text
+def _truncate_text_for_tts(total_text: str) -> str:
+    """Apply the total-length guard before sending text to TTS.
 
-    suffix = " ... I can continue with more details if you want."
-    limit = max_chars - len(suffix)
-    if limit <= 0:
-        return text[:max_chars]
-
-    truncated = text[:limit].rstrip()
-    sentence_end = max(
-        truncated.rfind(". "),
-        truncated.rfind("? "),
-        truncated.rfind("! "),
-    )
-    if sentence_end > 0:
-        truncated = truncated[:sentence_end + 1]
-    else:
-        word_end = truncated.rfind(" ")
-        if word_end > 0:
-            truncated = truncated[:word_end]
-
-    return f"{truncated.rstrip()}{suffix}"
+    This replaces the old ``_prepare_speech_text`` behaviour.  The full
+    *total_text* is still persisted to DB and shown in the UI — only the
+    copy that goes to the (expensive) TTS engine gets trimmed when it
+    exceeds ``tts_max_total_chars``.
+    """
+    limit = settings.tts_max_total_chars
+    if len(total_text) <= limit:
+        return total_text
+    # Chop at the last sentence boundary inside the limit
+    truncated = total_text[:limit].rstrip()
+    for sep in (". ", "? ", "! "):
+        pos = truncated.rfind(sep)
+        if pos > 0:
+            return truncated[: pos + 1]
+    word = truncated.rfind(" ")
+    return truncated[:word] if word > 0 else truncated
 
 
 # ── Students ──────────────────────────────────────────────────────────────────
@@ -297,11 +294,11 @@ async def speak(
             await memory.append_message(str(session_id), "user", transcript)
             await memory.append_message(str(session_id), "assistant", response_text)
 
-            # 8. TTS — graceful fallback: return text-only JSON on failure
-            speech_text = _prepare_speech_text(response_text)
+            # 8. TTS — chunked synthesis with graceful fallback
+            speech_text = _truncate_text_for_tts(response_text)
             try:
                 async with langfuse_helpers.create_span(trace, "tts_synthesize") as span:
-                    audio_response = await tts.synthesize(speech_text)
+                    audio_response = await tts.synthesize_chunked(speech_text)
                     if span is not None:
                         span.update(
                             input={"text_length": len(speech_text)},

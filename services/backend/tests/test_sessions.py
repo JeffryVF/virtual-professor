@@ -81,7 +81,7 @@ async def test_threshold_failure_creates_notification(
             return_value="No encontré información sobre eso en mis fuentes"
         )
         mock_rag.retrieve_context = AsyncMock(return_value=[])
-        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_tts.synthesize_chunked = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
@@ -135,7 +135,7 @@ async def test_scope_failure_no_notification(
     ):
         mock_stt.transcribe = AsyncMock(return_value="What is the weather?")
         mock_llm_module.is_in_scope = AsyncMock(return_value=False)
-        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_tts.synthesize_chunked = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
@@ -204,7 +204,7 @@ async def test_speak_no_langfuse_errors_when_disabled(
                 )
             ]
         )
-        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_tts.synthesize_chunked = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
@@ -231,12 +231,17 @@ async def test_speak_no_langfuse_errors_when_disabled(
 
 
 @pytest.mark.asyncio
-async def test_speak_persists_full_response_but_sends_shorter_text_to_tts(
+async def test_speak_sends_full_text_to_chunked_tts_when_within_limit(
     async_app, async_client, test_professor, db_session
 ):
+    """GIVEN a long response that is still within tts_max_total_chars
+    WHEN /speak is called
+    THEN the full text is sent to synthesize_chunked
+    AND the DB persists the full response unchanged.
+    """
     student_resp = await async_client.post(
         "/sessions/students",
-        json={"name": "Long Response Student", "email": "long-response@test.com", "language": "es"},
+        json={"name": "Long Resp Student", "email": "long-resp@test.com", "language": "es"},
     )
     assert student_resp.status_code == 201
     student_id = student_resp.json()["id"]
@@ -247,6 +252,7 @@ async def test_speak_persists_full_response_but_sends_shorter_text_to_tts(
     )
     assert session_resp.status_code == 201
     session_id = UUID(session_resp.json()["id"])
+    # ~3840 chars — well under default tts_max_total_chars=6000
     long_response = " ".join(["This is a detailed explanation about science."] * 80)
 
     with (
@@ -260,7 +266,7 @@ async def test_speak_persists_full_response_but_sends_shorter_text_to_tts(
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(return_value=long_response)
         mock_rag.retrieve_context = AsyncMock(return_value=[])
-        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_tts.synthesize_chunked = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
@@ -271,9 +277,10 @@ async def test_speak_persists_full_response_but_sends_shorter_text_to_tts(
         )
 
     assert response.status_code == 200
-    speech_text = mock_tts.synthesize.call_args.args[0]
-    assert len(speech_text) < len(long_response)
-    assert speech_text.endswith("I can continue with more details if you want.")
+    speech_text = mock_tts.synthesize_chunked.call_args.args[0]
+    # Full text sent (not truncated) because it's under tts_max_total_chars
+    assert len(speech_text) == len(long_response)
+    assert speech_text == long_response
 
     async with AsyncSessionLocal() as check_session:
         result = await check_session.execute(
@@ -281,6 +288,66 @@ async def test_speak_persists_full_response_but_sends_shorter_text_to_tts(
         )
         messages = result.scalars().all()
 
+    professor_messages = [message for message in messages if message.role.value == "professor"]
+    assert professor_messages[-1].content == long_response
+
+
+@pytest.mark.asyncio
+async def test_speak_truncates_tts_input_when_exceeds_max_total_chars(
+    async_app, async_client, test_professor, db_session
+):
+    """GIVEN a response that exceeds tts_max_total_chars
+    WHEN /speak is called
+    THEN the text sent to TTS is truncated at a sentence boundary
+    BUT the DB still persists the full response.
+    """
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "Trunc TTS Student", "email": "trunc-tts@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = UUID(session_resp.json()["id"])
+    # Build a response well over tts_max_total_chars (default 6000)
+    long_response = " ".join(["Sentence one."] * 2500)  # ~30 000 chars
+
+    with (
+        patch("routers.sessions.rag") as mock_rag,
+        patch("routers.sessions.llm") as mock_llm_module,
+        patch("routers.sessions.stt") as mock_stt,
+        patch("routers.sessions.tts") as mock_tts,
+        patch("routers.sessions.memory") as mock_memory,
+    ):
+        mock_stt.transcribe = AsyncMock(return_value="Tell me everything")
+        mock_llm_module.is_in_scope = AsyncMock(return_value=True)
+        mock_llm_module.generate_response = AsyncMock(return_value=long_response)
+        mock_rag.retrieve_context = AsyncMock(return_value=[])
+        mock_tts.synthesize_chunked = AsyncMock(return_value=b"audio data")
+        mock_memory.get_history = AsyncMock(return_value=[])
+        mock_memory.append_message = AsyncMock()
+
+        audio_file = io.BytesIO(b"fake audio bytes")
+        response = await async_client.post(
+            f"/sessions/{session_id}/speak",
+            files={"audio": ("test.wav", audio_file, "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    tts_text = mock_tts.synthesize_chunked.call_args.args[0]
+    # TTS input is truncated to stay within tts_max_total_chars
+    assert len(tts_text) <= 6000
+    # Persisted text is the full response
+    async with AsyncSessionLocal() as check_session:
+        result = await check_session.execute(
+            select(Message).where(Message.session_id == session_id).order_by(Message.timestamp)
+        )
+        messages = result.scalars().all()
     professor_messages = [message for message in messages if message.role.value == "professor"]
     assert professor_messages[-1].content == long_response
 
@@ -315,7 +382,7 @@ async def test_speak_returns_text_only_json_when_tts_fails(
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(return_value=response_text)
         mock_rag.retrieve_context = AsyncMock(return_value=[])
-        mock_tts.synthesize = AsyncMock(side_effect=RuntimeError("tts unavailable"))
+        mock_tts.synthesize_chunked = AsyncMock(side_effect=RuntimeError("tts unavailable"))
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
@@ -393,7 +460,7 @@ async def test_speak_creates_trace_when_langfuse_enabled(
                 )
             ]
         )
-        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_tts.synthesize_chunked = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
@@ -468,7 +535,7 @@ async def test_speak_aborts_pipeline_when_stt_fails_with_langfuse_enabled(
         mock_llm_module.is_in_scope = AsyncMock()
         mock_llm_module.generate_response = AsyncMock()
         mock_rag.retrieve_context = AsyncMock()
-        mock_tts.synthesize = AsyncMock()
+        mock_tts.synthesize_chunked = AsyncMock()
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
@@ -482,7 +549,7 @@ async def test_speak_aborts_pipeline_when_stt_fails_with_langfuse_enabled(
     assert "No se pudo capturar" in response.json()["detail"]
     mock_rag.retrieve_context.assert_not_called()
     mock_llm_module.generate_response.assert_not_called()
-    mock_tts.synthesize.assert_not_called()
+    mock_tts.synthesize_chunked.assert_not_called()
     mock_trace.end.assert_called_once()
 
 
@@ -569,7 +636,7 @@ async def test_speak_saves_sources_to_message(
                 ),
             ]
         )
-        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_tts.synthesize_chunked = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
@@ -655,7 +722,7 @@ async def test_get_message_sources(
                 )
             ]
         )
-        mock_tts.synthesize = AsyncMock(return_value=b"audio data")
+        mock_tts.synthesize_chunked = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
