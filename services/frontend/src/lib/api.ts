@@ -184,6 +184,20 @@ export interface IndexingStatusResponse {
   }
 }
 
+// ── LiveAvatar ────────────────────────────────────────────────────────────────
+
+export interface LiveAvatarAvatar {
+  id: string
+  name: string
+  preview_url: string
+  type: string
+  status: string
+  default_voice: { id: string; name: string } | null
+}
+
+export const listAvatars = () =>
+  authRequest<LiveAvatarAvatar[]>('/admin/liveavatar/avatars')
+
 export const getIndexingStatus = () =>
   authRequest<IndexingStatusResponse>('/admin/indexing/status')
 

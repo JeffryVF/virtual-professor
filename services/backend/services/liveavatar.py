@@ -85,6 +85,21 @@ async def stop_session(session_id: str, reason: str = "USER_CLOSED") -> dict:
         return response.json()["data"]
 
 
+async def list_public_avatars(page: int = 1, page_size: int = 20) -> list[dict]:
+    """GET /v1/avatars/public — returns the list of accessible avatars."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"{settings.liveavatar_api_url}/v1/avatars/public",
+            headers={"X-API-KEY": settings.liveavatar_api_key},
+            params={"page": page, "page_size": page_size},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        # Response envelope: {code, data: {count, next, previous, results}, message}
+        data = payload.get("data") or {}
+        return data.get("results") or []
+
+
 async def create_embed_session(avatar_id: str) -> dict:
     """Legacy embed helper (kept for reference)."""
     avatar_id = _normalize_avatar_id(avatar_id)

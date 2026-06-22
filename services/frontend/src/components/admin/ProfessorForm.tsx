@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { createProfessor, updateProfessor, type Professor, type ProfessorCreate } from '@/lib/api'
+import { createProfessor, updateProfessor, listAvatars, type Professor, type ProfessorCreate, type LiveAvatarAvatar } from '@/lib/api'
 import { Plus, Pencil } from 'lucide-react'
 
 interface Props {
@@ -29,6 +29,17 @@ export default function ProfessorForm({ professor, onSaved }: Props) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState<ProfessorCreate>(professor ?? empty)
   const [saving, setSaving] = useState(false)
+  const [avatars, setAvatars] = useState<LiveAvatarAvatar[]>([])
+  const [loadingAvatars, setLoadingAvatars] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    setLoadingAvatars(true)
+    listAvatars()
+      .then(setAvatars)
+      .catch(() => toast.error('Failed to load avatar list'))
+      .finally(() => setLoadingAvatars(false))
+  }, [open])
 
   const set = (k: keyof ProfessorCreate, v: string) => setForm(f => ({ ...f, [k]: v }))
 
@@ -87,14 +98,28 @@ export default function ProfessorForm({ professor, onSaved }: Props) {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="avatar_id">Avatar ID</Label>
-              <Input
-                id="avatar_id"
+              <Label htmlFor="avatar_id">Avatar</Label>
+              <Select
                 value={form.avatar_id}
-                onChange={e => set('avatar_id', e.target.value)}
-                placeholder="e.g. dd73ea75-1218-4ef3-92ce-606d5f7fbc0a"
-                required
-              />
+                onValueChange={v => set('avatar_id', v)}
+              >
+                <SelectTrigger id="avatar_id">
+                  <SelectValue placeholder="Select an avatar" />
+                </SelectTrigger>
+                <SelectContent>
+                  {loadingAvatars ? (
+                    <SelectItem value="" disabled>Loading avatars…</SelectItem>
+                  ) : avatars.length === 0 ? (
+                    <SelectItem value="" disabled>No avatars available</SelectItem>
+                  ) : (
+                    avatars.map(a => (
+                      <SelectItem key={a.id} value={a.id}>
+                        {a.name} ({a.id.slice(0, 8)}…)
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div className="space-y-1.5">
