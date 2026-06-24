@@ -19,6 +19,7 @@ venv/
 node_modules/
 .next/
 *.tsbuildinfo
+package-lock.json
 
 # ── IDE / Editor ───────────────────────────────────────────────
 .vscode/
