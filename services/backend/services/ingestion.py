@@ -1,3 +1,4 @@
+import fitz
 import httpx
 from llama_index.core import StorageContext, VectorStoreIndex
 from llama_index.core.node_parser import SentenceSplitter
@@ -21,9 +22,47 @@ EMBED_DIM = 768  # nomic-embed-text output dimension
 
 _FORMAT_READERS: dict[str, type[BaseReader]] = {
     "pdf": PDFReader,
-    "docx": PDFReader,   # fallback; swap for DocxReader when available
+    "docx": DocxReader,
     "pptx": PptxReader,
 }
+
+
+def _validate_document(file_path: str, file_format: str, max_pages: int) -> tuple[bool, str]:
+    """Validate a document before ingestion.
+
+    For PDFs (via PyMuPDF/fitz):
+      - Reject if password-protected
+      - Reject if page count exceeds max_pages
+      - Reject if no page has extractable text (scanned/image-only)
+    For other formats (docx, pptx, media, url): no PDF-specific checks.
+
+    Returns (is_valid, error_message). On success, error_message is empty string.
+    """
+    if file_format == "pdf":
+        try:
+            doc = fitz.open(file_path)
+        except Exception:
+            return (False, "PDF_CORRUPT: PDF file is corrupted or cannot be opened")
+
+        with doc:
+            if doc.is_encrypted:
+                return (False, "PDF_PASSWORD_PROTECTED: PDF is password-protected and cannot be processed")
+
+            if doc.page_count > max_pages:
+                return (
+                    False,
+                    f"PDF_TOO_MANY_PAGES: PDF has {doc.page_count} pages, maximum is {max_pages}",
+                )
+
+            for page in doc:
+                text = page.get_text().strip()
+                if text:
+                    return (True, "")
+
+            return (False, "PDF_NO_EXTRACTABLE_TEXT: PDF contains no extractable text (possible scanned document)")
+
+    # Non-PDF formats skip pre-ingestion PDF validation
+    return (True, "")
 
 _MEDIA_FORMATS = {"mp3", "mp4", "wav", "ogg", "m4a"}
 
@@ -62,6 +101,20 @@ async def ingest_document(
 
     async with AsyncSessionLocal() as db:
         try:
+            # Pre-ingestion validation
+            is_valid, error_msg = _validate_document(
+                file_path,
+                file_format,
+                max_pages=settings.upload_max_pages,
+            )
+            if not is_valid:
+                result = await db.execute(select(Document).where(Document.id == document_id))
+                doc = result.scalar_one()
+                doc.status = DocumentStatus.error
+                doc.error_message = error_msg
+                await db.commit()
+                return
+
             qdrant = QdrantClient(url=settings.qdrant_url)
             await _ensure_collection(qdrant, professor_collection)
 
@@ -94,9 +147,23 @@ async def ingest_document(
             splitter = SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
             nodes = splitter.get_nodes_from_documents(documents)
 
+            # Post-parse validation: ensure at least one non-empty node
+            if not nodes or all(not node.get_content().strip() for node in nodes):
+                result = await db.execute(select(Document).where(Document.id == document_id))
+                doc = result.scalar_one()
+                doc.status = DocumentStatus.error
+                doc.error_message = "EMPTY_CHUNKS: Document produced no usable text content after chunking"
+                await db.commit()
+                return
+
+            # Fetch document for source_filename metadata
+            result = await db.execute(select(Document).where(Document.id == document_id))
+            doc = result.scalar_one()
+
             for node in nodes:
                 node.metadata["document_id"] = document_id
                 node.metadata["professor_collection"] = professor_collection
+                node.metadata["source_filename"] = doc.filename
 
             # Index into Qdrant
             vector_store = QdrantVectorStore(client=qdrant, collection_name=professor_collection)
@@ -104,8 +171,6 @@ async def ingest_document(
             VectorStoreIndex(nodes, storage_context=storage_context, embed_model=embed_model)
 
             # Mark document as ready
-            result = await db.execute(select(Document).where(Document.id == document_id))
-            doc = result.scalar_one()
             doc.status = DocumentStatus.ready
             doc.chunk_count = len(nodes)
             await db.commit()
@@ -119,6 +184,15 @@ async def ingest_document(
             doc.error_message = str(exc)
             await db.commit()
             raise
+
+
+async def delete_qdrant_collection(collection_name: str) -> None:
+    """Delete the entire Qdrant collection (used when removing a professor)."""
+    client = QdrantClient(url=settings.qdrant_url)
+    existing = {c.name for c in client.get_collections().collections}
+    if collection_name in existing:
+        client.delete_collection(collection_name=collection_name)
+    client.close()
 
 
 async def delete_document_chunks(professor_collection: str, document_id: str) -> None:

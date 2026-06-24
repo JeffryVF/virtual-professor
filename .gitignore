@@ -19,12 +19,20 @@ venv/
 node_modules/
 .next/
 *.tsbuildinfo
+package-lock.json
 
 # ── IDE / Editor ───────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# ── Test / Coverage ────────────────────────────────────────────
+.coverage
+*.db
+
+# ── Tool caches ────────────────────────────────────────────────
+.atl/.skill-registry.cache.json
 
 # ── OS ─────────────────────────────────────────────────────────
 .DS_Store

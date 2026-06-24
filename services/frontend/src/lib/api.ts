@@ -1,5 +1,7 @@
+import { getAccessToken, refreshTokens, clearTokens } from '@/lib/auth'
+import { handleApiError } from '@/lib/error-handler'
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? '/api'
-const ADMIN_KEY = process.env.NEXT_PUBLIC_ADMIN_KEY ?? 'changeme'
 
 export type Language = 'es' | 'en' | 'both'
 export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'error'
@@ -34,45 +36,79 @@ export interface Document {
   uploaded_at: string
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      'X-Admin-Key': ADMIN_KEY,
-      ...init?.headers,
-    },
-  })
+// ── Auth-aware fetch helpers ───────────────────────────────────────────────────
+
+async function authFetch(path: string, init?: RequestInit): Promise<Response> {
+  const token = getAccessToken()
+  const headers = new Headers(init?.headers)
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+
+  let res = await fetch(`${API_BASE}${path}`, { ...init, headers })
+  console.info('[api] request finished', { path, method: init?.method ?? 'GET', status: res.status })
+
+  if (res.status === 401) {
+    const refreshed = await refreshTokens()
+    if (refreshed) {
+      const retryHeaders = new Headers(init?.headers)
+      retryHeaders.set('Authorization', `Bearer ${refreshed.access_token}`)
+      res = await fetch(`${API_BASE}${path}`, { ...init, headers: retryHeaders })
+      console.info('[api] request retry finished', { path, method: init?.method ?? 'GET', status: res.status })
+    } else {
+      clearTokens()
+      console.warn('[api] auth expired', { path, method: init?.method ?? 'GET' })
+      if (typeof window !== 'undefined') {
+        window.location.href = '/login?expired=true'
+      }
+      const error = new Error('Tu sesión expiró. Inicia sesión nuevamente.') as Error & { status?: number; detail?: string }
+      error.status = 401
+      error.detail = 'Tu sesión expiró. Inicia sesión nuevamente.'
+      throw error
+    }
+  }
+
+  return res
+}
+
+async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await authFetch(path, init)
   if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`${res.status} ${text}`)
+    throw await handleApiError(res)
   }
   return res.json() as Promise<T>
 }
 
 // ── Professors ────────────────────────────────────────────────────────────────
 
-export const getProfessors = () =>
-  request<Professor[]>('/admin/professors')
+/** Public endpoint — no auth required. Used by the student portal. */
+export async function getPublicProfessors(): Promise<Professor[]> {
+  const res = await fetch(`${API_BASE}/professors`)
+  if (!res.ok) throw await handleApiError(res)
+  return res.json()
+}
+
+/** Admin endpoint — requires auth. Used by the admin panel. */
+export const getProfessors = () => authRequest<Professor[]>('/admin/professors')
 
 export const createProfessor = (data: ProfessorCreate) =>
-  request<Professor>('/admin/professors', {
+  authRequest<Professor>('/admin/professors', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   })
 
 export const updateProfessor = (id: string, data: Partial<ProfessorCreate>) =>
-  request<Professor>(`/admin/professors/${id}`, {
+  authRequest<Professor>(`/admin/professors/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   })
 
-export const deleteProfessor = (id: string) =>
-  fetch(`${API_BASE}/admin/professors/${id}`, {
-    method: 'DELETE',
-    headers: { 'X-Admin-Key': ADMIN_KEY },
-  })
+export const deleteProfessor = async (id: string): Promise<void> => {
+  const res = await authFetch(`/admin/professors/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw await handleApiError(res)
+}
 
 export interface Student {
   id: string
@@ -101,28 +137,88 @@ export interface LiveAvatarConnect {
 // ── Documents ─────────────────────────────────────────────────────────────────
 
 export const getDocuments = (professorId: string) =>
-  request<Document[]>(`/admin/professors/${professorId}/documents`)
+  authRequest<Document[]>(`/admin/professors/${professorId}/documents`)
 
 export const uploadDocument = (professorId: string, file: File) => {
   const form = new FormData()
   form.append('file', file)
-  return request<Document>(`/admin/professors/${professorId}/documents`, {
+  return authRequest<Document>(`/admin/professors/${professorId}/documents`, {
     method: 'POST',
     body: form,
   })
 }
 
-export const deleteDocument = (documentId: string) =>
-  fetch(`${API_BASE}/admin/documents/${documentId}`, {
-    method: 'DELETE',
-    headers: { 'X-Admin-Key': ADMIN_KEY },
+export const deleteDocument = async (documentId: string): Promise<void> => {
+  const res = await authFetch(`/admin/documents/${documentId}`, { method: 'DELETE' })
+  if (!res.ok) throw await handleApiError(res)
+}
+
+// ── RAG / Indexing ────────────────────────────────────────────────────────────
+
+export interface ChunkResponse {
+  chunk_index: number
+  text: string
+  score: number | null
+  page_number: string | null
+}
+
+export interface CollectionStatus {
+  professor_id: string
+  professor_name: string
+  collection: string
+  total_documents: number
+  documents_by_status: Record<string, number>
+  total_chunks: number
+  qdrant_points: number
+  last_indexed_at: string | null
+  last_error: string | null
+}
+
+export interface IndexingStatusResponse {
+  collections: CollectionStatus[]
+  summary: {
+    total_collections: number
+    total_documents: number
+    total_chunks: number
+    collections_with_errors: number
+  }
+}
+
+// ── LiveAvatar ────────────────────────────────────────────────────────────────
+
+export interface LiveAvatarAvatar {
+  id: string
+  name: string
+  preview_url: string
+  type: string
+  status: string
+  default_voice: { id: string; name: string } | null
+}
+
+export const listAvatars = () =>
+  authRequest<LiveAvatarAvatar[]>('/admin/liveavatar/avatars')
+
+export const getIndexingStatus = () =>
+  authRequest<IndexingStatusResponse>('/admin/indexing/status')
+
+export const getDocumentChunks = (documentId: string, offset?: number, limit?: number) => {
+  const params = new URLSearchParams()
+  if (offset !== undefined) params.set('offset', String(offset))
+  if (limit !== undefined) params.set('limit', String(limit))
+  const qs = params.toString()
+  return authRequest<ChunkResponse[]>(`/admin/documents/${documentId}/chunks${qs ? `?${qs}` : ''}`)
+}
+
+export const reindexDocument = (documentId: string) =>
+  authRequest<{ status: string; document_id: string }>(`/admin/documents/${documentId}/reindex`, {
+    method: 'POST',
   })
 
 // ── Students & Sessions ───────────────────────────────────────────────────────
 
 export const createStudent = (name: string, language: Language) => {
   const email = `${name.toLowerCase().replace(/\s+/g, '.')}.${Date.now()}@virtualprofesor.edu`
-  return request<Student>('/sessions/students', {
+  return authRequest<Student>('/sessions/students', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, email, language }),
@@ -130,32 +226,52 @@ export const createStudent = (name: string, language: Language) => {
 }
 
 export const createSession = (studentId: string, professorId: string) =>
-  request<Session>('/sessions', {
+  authRequest<Session>('/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ student_id: studentId, professor_id: professorId }),
   })
 
 export const connectLiveAvatar = (sessionId: string) =>
-  request<LiveAvatarConnect>(`/sessions/${sessionId}/liveavatar-connect`, {
+  authRequest<LiveAvatarConnect>(`/sessions/${sessionId}/liveavatar-connect`, {
     method: 'POST',
+  })
+
+export const stopLiveAvatarSession = (sessionId: string, liveavatarSessionId: string, reason = 'USER_CLOSED') =>
+  authRequest<{ status: string; liveavatar_session_id?: string }>(`/sessions/${sessionId}/liveavatar-stop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ liveavatar_session_id: liveavatarSessionId, reason }),
   })
 
 export const getSessionHistory = (sessionId: string) =>
-  request<Array<{ id: string; role: string; content: string; timestamp: string }>>(
+  authRequest<Array<{ id: string; role: string; content: string; timestamp: string }>>(
     `/sessions/${sessionId}/history`
   )
 
-export const endSession = (sessionId: string) =>
-  fetch(`${API_BASE}/sessions/${sessionId}`, { method: 'DELETE' })
+export const endSession = async (sessionId: string): Promise<void> => {
+  const res = await authFetch(`/sessions/${sessionId}`, { method: 'DELETE' })
+  if (!res.ok) throw await handleApiError(res)
+}
 
-export async function speakInSession(sessionId: string, audio: Blob): Promise<ArrayBuffer> {
+export type SpeakResult =
+  | { kind: 'audio'; buffer: ArrayBuffer }
+  | { kind: 'text-only'; text: string }
+
+export async function speakInSession(sessionId: string, audio: Blob): Promise<SpeakResult> {
   const form = new FormData()
-  form.append('audio', audio, 'recording.webm')
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/speak`, {
+  form.append('audio', audio, 'recording')
+  const res = await authFetch(`/sessions/${sessionId}/speak`, {
     method: 'POST',
     body: form,
   })
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
-  return res.arrayBuffer()
+  if (!res.ok) throw await handleApiError(res)
+
+  const contentType = res.headers.get('Content-Type') ?? ''
+  if (contentType.includes('application/json')) {
+    const body = await res.json() as { text?: string }
+    return { kind: 'text-only', text: body.text ?? '' }
+  }
+
+  return { kind: 'audio', buffer: await res.arrayBuffer() }
 }

@@ -28,6 +28,15 @@ class MessageRole(enum.Enum):
     professor = "professor"
 
 
+class ThresholdNotification(Base):
+    __tablename__ = "threshold_notifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    professor_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("professors.id"))
+    query: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
 class Professor(Base):
     __tablename__ = "professors"
 
@@ -94,6 +103,7 @@ class Message(Base):
     role: Mapped[MessageRole] = mapped_column(SAEnum(MessageRole))
     content: Mapped[str] = mapped_column(Text)
     audio_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sources_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
     session: Mapped["Session"] = relationship(back_populates="messages")
