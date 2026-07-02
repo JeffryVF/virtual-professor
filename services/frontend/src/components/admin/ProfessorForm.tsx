@@ -108,9 +108,13 @@ export default function ProfessorForm({ professor, onSaved }: Props) {
                 </SelectTrigger>
                 <SelectContent>
                   {loadingAvatars ? (
-                    <SelectItem value="" disabled>Loading avatars…</SelectItem>
+                    <div className="px-2 py-3 text-sm text-muted-foreground text-center">
+                      Loading avatars…
+                    </div>
                   ) : avatars.length === 0 ? (
-                    <SelectItem value="" disabled>No avatars available</SelectItem>
+                    <div className="px-2 py-3 text-sm text-muted-foreground text-center">
+                      No avatars available
+                    </div>
                   ) : (
                     avatars.map(a => (
                       <SelectItem key={a.id} value={a.id}>
