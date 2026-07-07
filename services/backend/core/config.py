@@ -34,11 +34,6 @@ class Settings(BaseSettings):
     tts_chunk_max_chars: int = 700  # max chars per TTS chunk when splitting
     tts_max_total_chars: int = 6000  # max total chars to synthesize — longer text is truncated gracefully
 
-    # LiveAvatar
-    liveavatar_api_key: str
-    liveavatar_api_url: str
-    liveavatar_sandbox: bool = False
-
     # Admin
     admin_api_key: str
 
@@ -110,7 +105,7 @@ class Settings(BaseSettings):
             return parts if parts else ["*"]
         return ["*"]
 
-    model_config = {"env_file": ".env"}
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
     def validate_production(self) -> list[str]:
         """Check production-critical settings and return a list of warnings/errors."""
@@ -121,17 +116,6 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "JWT_SECRET_KEY is empty or set to 'changeme'. "
                 "Generate a strong secret with: openssl rand -hex 32"
-            )
-
-        # ── LiveAvatar API key ──────────────────────────────────────────────
-        if not self.liveavatar_api_key or self.liveavatar_api_key in (
-            "changeme",
-            "your_key_here",
-            "",
-        ):
-            raise RuntimeError(
-                "LIVEAVATAR_API_KEY is empty or set to a placeholder. "
-                "Set it to a valid LiveAvatar API key."
             )
 
         # ── Admin API key (warning only — still works with a default) ───────

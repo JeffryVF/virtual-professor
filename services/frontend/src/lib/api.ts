@@ -127,11 +127,9 @@ export interface Session {
   credits_used: number
 }
 
-export interface LiveAvatarConnect {
-  livekit_url: string
-  livekit_client_token: string
-  ws_url: string
-  liveavatar_session_id: string
+export interface LocalAvatarConnectResponse {
+  status: 'ok'
+  session_id: string
 }
 
 // ── Documents ─────────────────────────────────────────────────────────────────
@@ -184,20 +182,6 @@ export interface IndexingStatusResponse {
   }
 }
 
-// ── LiveAvatar ────────────────────────────────────────────────────────────────
-
-export interface LiveAvatarAvatar {
-  id: string
-  name: string
-  preview_url: string
-  type: string
-  status: string
-  default_voice: { id: string; name: string } | null
-}
-
-export const listAvatars = () =>
-  authRequest<LiveAvatarAvatar[]>('/admin/liveavatar/avatars')
-
 export const getIndexingStatus = () =>
   authRequest<IndexingStatusResponse>('/admin/indexing/status')
 
@@ -232,16 +216,9 @@ export const createSession = (studentId: string, professorId: string) =>
     body: JSON.stringify({ student_id: studentId, professor_id: professorId }),
   })
 
-export const connectLiveAvatar = (sessionId: string) =>
-  authRequest<LiveAvatarConnect>(`/sessions/${sessionId}/liveavatar-connect`, {
+export const localAvatarConnect = (sessionId: string) =>
+  authRequest<LocalAvatarConnectResponse>(`/sessions/${sessionId}/local-avatar-connect`, {
     method: 'POST',
-  })
-
-export const stopLiveAvatarSession = (sessionId: string, liveavatarSessionId: string, reason = 'USER_CLOSED') =>
-  authRequest<{ status: string; liveavatar_session_id?: string }>(`/sessions/${sessionId}/liveavatar-stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ liveavatar_session_id: liveavatarSessionId, reason }),
   })
 
 export const getSessionHistory = (sessionId: string) =>

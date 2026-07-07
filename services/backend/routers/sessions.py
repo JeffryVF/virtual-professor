@@ -25,37 +25,11 @@ from models.schemas import (
 )
 from services import langfuse as langfuse_helpers
 from services import llm, memory, rag, stt, tts
-from services.liveavatar import create_session_token, start_session, stop_session
-from services.memory import (
-    delete_liveavatar_session_id,
-    get_liveavatar_session_id,
-    save_liveavatar_session_id,
-)
+
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
-
-_LIVEAVATAR_REQUIRED_START_FIELDS = (
-    "session_id",
-    "livekit_url",
-    "livekit_client_token",
-    "ws_url",
-)
-
-
-def _validate_liveavatar_start_payload(payload: dict) -> dict:
-    missing = [field for field in _LIVEAVATAR_REQUIRED_START_FIELDS if not payload.get(field)]
-    if missing:
-        raise ValueError(f"LiveAvatar start session payload missing required fields: {', '.join(missing)}")
-    return payload
-
-
-async def _best_effort_stop_liveavatar_session(session_id: str, reason: str) -> None:
-    try:
-        await stop_session(session_id, reason=reason)
-    except Exception:
-        log.warning("Best-effort LiveAvatar stop failed for session_id=%s", session_id)
 
 # Whisper expects standard language codes; map our enum values accordingly.
 _STT_LANGUAGE_MAP = {
@@ -320,115 +294,18 @@ async def speak(
         raise HTTPException(status_code=500, detail=f"Internal error: {type(exc).__name__}: {exc}")
 
 
-@router.post("/{session_id}/liveavatar-connect")
-async def liveavatar_connect(session_id: UUID, db: AsyncSession = Depends(get_db)):
-    try:
-        session_result = await db.execute(select(DBSession).where(DBSession.id == session_id))
-        session = session_result.scalar_one_or_none()
-        if not session or session.ended_at:
-            raise HTTPException(status_code=404, detail="Session not found or already ended")
+@router.post("/{session_id}/local-avatar-connect")
+async def local_avatar_connect(session_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Pure session validation — no external API calls, no tokens, no WebSocket URLs.
 
-        prof_result = await db.execute(select(Professor).where(Professor.id == session.professor_id))
-        professor = prof_result.scalar_one()
-
-        # ── Stale session reaper ────────────────────────────────────────────
-        # Before creating a new LiveAvatar session, close any previous one
-        # that may have been left open (e.g. browser close without cleanup).
-        stale_liveavatar_id = await get_liveavatar_session_id(str(session_id))
-        if stale_liveavatar_id:
-            log.info("Reaping stale LiveAvatar session %s for local session %s", stale_liveavatar_id, session_id)
-            await _best_effort_stop_liveavatar_session(stale_liveavatar_id, reason="STALE_REPLACED")
-        # ─────────────────────────────────────────────────────────────────────
-
-        try:
-            token_data = await create_session_token(professor.avatar_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
-        try:
-            session_data = await start_session(token_data["session_token"])
-            session_data = _validate_liveavatar_start_payload(session_data)
-        except ValueError as exc:
-            session_id_value = token_data.get("session_id")
-            if session_id_value:
-                await _best_effort_stop_liveavatar_session(str(session_id_value), reason="SERVER_ERROR")
-            raise HTTPException(status_code=502, detail=str(exc))
-        except httpx.HTTPStatusError:
-            session_id_value = token_data.get("session_id")
-            if session_id_value:
-                await _best_effort_stop_liveavatar_session(str(session_id_value), reason="SERVER_ERROR")
-            raise
-
-        # Persist the mapping so we can reap later
-        await save_liveavatar_session_id(str(session_id), session_data["session_id"])
-
-        log.info(
-            "LiveAvatar session ready session_id=%s room_id=%s returned_fields=%s",
-            token_data.get("session_id"),
-            session_data.get("session_id"),
-            sorted(session_data.keys()),
-        )
-
-        return {
-            "livekit_url": session_data["livekit_url"],
-            "livekit_client_token": session_data["livekit_client_token"],
-            "ws_url": session_data["ws_url"],
-            "liveavatar_session_id": session_data["session_id"],
-        }
-    except HTTPException:
-        raise
-    except httpx.HTTPStatusError as exc:
-        error_text = exc.response.text.lower()
-        if exc.response.status_code == 403 and "4032" in error_text and "session concurrency limit reached" in error_text:
-            raise HTTPException(
-                status_code=503,
-                detail="LiveAvatar is at capacity right now. Try again in a moment or continue in audio-only mode.",
-            )
-        raise HTTPException(
-            status_code=exc.response.status_code,
-            detail=f"LiveAvatar API error on {exc.request.url}: {exc.response.text}",
-        )
-    except Exception as exc:
-        log.exception("Unhandled error in liveavatar-connect")
-        raise HTTPException(status_code=500, detail=f"Internal error: {type(exc).__name__}: {exc}")
-
-
-@router.post("/{session_id}/liveavatar-stop")
-async def liveavatar_stop(
-    session_id: UUID,
-    payload: dict = Body(default_factory=dict),
-    db: AsyncSession = Depends(get_db),
-):
-    try:
-        session_result = await db.execute(select(DBSession).where(DBSession.id == session_id))
-        session = session_result.scalar_one_or_none()
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        liveavatar_session_id = payload.get("liveavatar_session_id") if isinstance(payload, dict) else None
-        if not liveavatar_session_id:
-            return {"status": "skipped", "reason": "missing_liveavatar_session_id"}
-
-        try:
-            await stop_session(str(liveavatar_session_id), reason=payload.get("reason", "USER_CLOSED"))
-        except httpx.HTTPStatusError as exc:
-            # If the provider already reaped the session, treat as success.
-            if exc.response.status_code == 404:
-                await delete_liveavatar_session_id(str(session_id))
-                return {"status": "already_closed"}
-            # For other HTTP errors the session might still be alive — keep the
-            # mapping so the reaper can retry or a human can investigate.
-            raise HTTPException(
-                status_code=exc.response.status_code,
-                detail=f"LiveAvatar API error on {exc.request.url}: {exc.response.text}",
-            )
-
-        await delete_liveavatar_session_id(str(session_id))
-        return {"status": "stopped", "liveavatar_session_id": str(liveavatar_session_id)}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.exception("Unhandled error in liveavatar-stop")
-        raise HTTPException(status_code=500, detail=f"Internal error: {type(exc).__name__}: {exc}")
+    Returns ``{status: \"ok\", session_id: \"<uuid>\"}`` if the session exists
+    and has not ended.  Raises 404 otherwise.
+    """
+    session_result = await db.execute(select(DBSession).where(DBSession.id == session_id))
+    session = session_result.scalar_one_or_none()
+    if not session or session.ended_at:
+        raise HTTPException(status_code=404, detail="Session not found or already ended")
+    return {"status": "ok", "session_id": str(session.id)}
 
 
 @router.post("/{session_id}/compress")
@@ -458,8 +335,6 @@ async def end_session(session_id: UUID, db: AsyncSession = Depends(get_db)):
     session.ended_at = datetime.utcnow()
     await db.commit()
     await memory.clear_session(str(session_id))
-    # Clean up LiveAvatar session mapping if it exists
-    await delete_liveavatar_session_id(str(session_id))
 
 
 @router.get("/{session_id}/messages/{message_id}/sources", response_model=MessageSourcesResponse)

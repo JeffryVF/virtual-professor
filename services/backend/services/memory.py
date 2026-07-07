@@ -166,38 +166,4 @@ async def clear_session(session_id: str) -> None:
         log.error("Failed to clear session from Redis: %s", exc)
 
 
-# ── LiveAvatar session tracking (stale session reaper) ───────────────────────
 
-_LIVEAVATAR_KEY = "liveavatar:{session_id}"
-
-
-async def save_liveavatar_session_id(session_id: str, liveavatar_session_id: str) -> None:
-    """Persist the mapping from local session_id to LiveAvatar session_id in Redis."""
-    try:
-        client = await _ensure_connected()
-        await client.setex(
-            _LIVEAVATAR_KEY.format(session_id=session_id),
-            86400,  # 24h TTL — safe even if cleanup is missed
-            liveavatar_session_id,
-        )
-    except Exception as exc:
-        log.error("Failed to save LiveAvatar session mapping: %s", exc)
-
-
-async def get_liveavatar_session_id(session_id: str) -> str | None:
-    """Retrieve the LiveAvatar session_id for a local session, if any."""
-    try:
-        client = await _ensure_connected()
-        return await client.get(_LIVEAVATAR_KEY.format(session_id=session_id))
-    except Exception as exc:
-        log.error("Failed to read LiveAvatar session mapping: %s", exc)
-        return None
-
-
-async def delete_liveavatar_session_id(session_id: str) -> None:
-    """Remove the LiveAvatar session mapping from Redis."""
-    try:
-        client = await _ensure_connected()
-        await client.delete(_LIVEAVATAR_KEY.format(session_id=session_id))
-    except Exception as exc:
-        log.error("Failed to delete LiveAvatar session mapping: %s", exc)

@@ -31,7 +31,7 @@ from models.schemas import (
     SessionResponse,
 )
 from services.ingestion import delete_document_chunks, delete_qdrant_collection, ingest_document
-from services.liveavatar import list_public_avatars
+
 
 log = logging.getLogger(__name__)
 
@@ -572,16 +572,6 @@ async def get_indexing_status(
             "collections_with_errors": collections_with_errors,
         },
     )
-
-
-# ── LiveAvatar Avatars ─────────────────────────────────────────────────────────
-
-@router.get("/liveavatar/avatars")
-async def get_available_avatars(
-    _ = Depends(verify_admin_or_deprecated_key),
-):
-    """Fetch public avatars from LiveAvatar so the admin can pick one."""
-    return await list_public_avatars()
 
 
 # ── Sessions (admin view) ─────────────────────────────────────────────────────

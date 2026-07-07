@@ -1,7 +1,7 @@
 """
 Async test fixtures for Virtual Professor API.
 
-External services (Ollama, Qdrant, Redis, Whisper, Kokoro, LiveAvatar)
+External services (Ollama, Qdrant, Redis, Whisper, Kokoro)
 are mocked to keep tests fast, deterministic, and dependency-free.
 """
 
@@ -22,8 +22,6 @@ os.environ.setdefault("OLLAMA_EMBED_MODEL", "test-embed")
 os.environ.setdefault("WHISPER_URL", "http://localhost:9000")
 os.environ.setdefault("KOKORO_URL", "http://localhost:8880")
 os.environ.setdefault("DEBUG", "true")
-os.environ.setdefault("LIVEAVATAR_API_KEY", "test-key")
-os.environ.setdefault("LIVEAVATAR_API_URL", "http://localhost:8080")
 os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 os.environ.setdefault("SESSION_MEMORY_MESSAGES", "10")
 os.environ.setdefault("SESSION_TIMEOUT_MINUTES", "30")

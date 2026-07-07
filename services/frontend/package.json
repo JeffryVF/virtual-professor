@@ -22,7 +22,9 @@
     "sonner": "^1.5.0",
     "tailwind-merge": "^2.3.0",
     "tailwindcss-animate": "^1.0.7",
-    "livekit-client": "^2.5.0"
+    "three": "^0.172.0",
+    "@react-three/fiber": "^9.0.0",
+    "@react-three/drei": "^10.0.0"
   },
   "devDependencies": {
     "@types/node": "^20",

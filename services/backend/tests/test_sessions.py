@@ -553,32 +553,6 @@ async def test_speak_aborts_pipeline_when_stt_fails_with_langfuse_enabled(
     mock_trace.end.assert_called_once()
 
 
-@pytest.mark.asyncio
-async def test_liveavatar_connect_rejects_non_uuid_avatar_id(async_client, test_professor):
-    """GIVEN a professor with a placeholder avatar_id
-    WHEN LiveAvatar connect is requested
-    THEN the API returns 422 before calling the external LiveAvatar service.
-    """
-    student_resp = await async_client.post(
-        "/sessions/students",
-        json={"name": "Avatar Student", "email": "avatar@test.com", "language": "es"},
-    )
-    assert student_resp.status_code == 201
-    student_id = student_resp.json()["id"]
-
-    session_resp = await async_client.post(
-        "/sessions",
-        json={"professor_id": str(test_professor.id), "student_id": student_id},
-    )
-    assert session_resp.status_code == 201
-    session_id = session_resp.json()["id"]
-
-    response = await async_client.post(f"/sessions/{session_id}/liveavatar-connect")
-
-    assert response.status_code == 422
-    assert "valid UUID" in response.json()["detail"]
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 # Source Citations
 # ═════════════════════════════════════════════════════════════════════════════
@@ -776,6 +750,87 @@ async def test_get_message_sources_empty(async_app, async_client, test_professor
     WHEN GET /sessions/{session_id}/messages/{message_id}/sources
     THEN empty sources list is returned.
     """
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Local Avatar Connect — new endpoint (no external API dependency)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_local_avatar_connect_active(
+    async_client, test_professor, db_session
+):
+    """GIVEN an active session with ended_at IS NULL
+    WHEN POST /sessions/{session_id}/local-avatar-connect
+    THEN status 200 AND body equals {status: "ok", session_id: "<id>"}
+    """
+    # Create student via API
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "LocalAvatar Student", "email": "local-avatar@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    # Create session via API
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    # Connect via new endpoint
+    resp = await async_client.post(f"/sessions/{session_id}/local-avatar-connect")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "session_id": session_id}
+
+
+@pytest.mark.asyncio
+async def test_local_avatar_connect_not_found(async_client):
+    """GIVEN a non-existent session_id
+    WHEN POST /sessions/{session_id}/local-avatar-connect
+    THEN status 404
+    """
+    from uuid import uuid4
+
+    resp = await async_client.post(f"/sessions/{uuid4()}/local-avatar-connect")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_local_avatar_connect_ended(
+    async_client, test_professor, db_session
+):
+    """GIVEN a session with ended_at set
+    WHEN POST /sessions/{session_id}/local-avatar-connect
+    THEN status 404
+    """
+    # Create student
+    student_resp = await async_client.post(
+        "/sessions/students",
+        json={"name": "EndedLA Student", "email": "ended-la@test.com", "language": "es"},
+    )
+    assert student_resp.status_code == 201
+    student_id = student_resp.json()["id"]
+
+    # Create session
+    session_resp = await async_client.post(
+        "/sessions",
+        json={"professor_id": str(test_professor.id), "student_id": student_id},
+    )
+    assert session_resp.status_code == 201
+    session_id = session_resp.json()["id"]
+
+    # End the session
+    end_resp = await async_client.delete(f"/sessions/{session_id}")
+    assert end_resp.status_code == 204
+
+    # Try to connect — should get 404
+    resp = await async_client.post(f"/sessions/{session_id}/local-avatar-connect")
+    assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower() or "ended" in resp.json()["detail"].lower()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
