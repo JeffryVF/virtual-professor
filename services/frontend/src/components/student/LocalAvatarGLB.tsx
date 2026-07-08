@@ -1,8 +1,9 @@
 'use client'
 
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { useGLTF, OrbitControls } from '@react-three/drei'
+import { Box3, Vector3 } from 'three'
 import type { Group } from 'three'
 
 interface LocalAvatarGLBProps {
@@ -13,6 +14,20 @@ interface LocalAvatarGLBProps {
 function GLBModel({ speaking }: { speaking: boolean }) {
   const { scene } = useGLTF('/avatars/avatar.glb')
   const groupRef = useRef<Group>(null)
+
+  const avatar = useMemo(() => {
+    const model = scene.clone(true)
+    const box = new Box3().setFromObject(model)
+    const size = box.getSize(new Vector3())
+    const center = box.getCenter(new Vector3())
+    const targetHeight = 1.9
+    const scale = size.y > 0 ? targetHeight / size.y : 1
+
+    model.scale.setScalar(scale)
+    model.position.set(-center.x * scale, -center.y * scale, -center.z * scale)
+
+    return model
+  }, [scene])
 
   useFrame((state) => {
     if (!groupRef.current) return
@@ -27,13 +42,19 @@ function GLBModel({ speaking }: { speaking: boolean }) {
     if (speaking) {
       const pulse = 1 + Math.sin(state.clock.elapsedTime * 4) * 0.03
       groupRef.current.scale.setScalar(pulse)
+    } else {
+      groupRef.current.scale.setScalar(1)
     }
   })
 
-  return <primitive ref={groupRef} object={scene} />
+  return (
+    <group ref={groupRef}>
+      <primitive object={avatar} />
+    </group>
+  )
 }
 
-export default function LocalAvatarGLB({ speaking = false }: LocalAvatarGLBProps) {
+export default function LocalAvatarGLB({ speaking = false, onWebGLUnavailable }: LocalAvatarGLBProps) {
   const webglOk = useMemo(() => {
     try {
       const canvas = document.createElement('canvas')
@@ -42,6 +63,10 @@ export default function LocalAvatarGLB({ speaking = false }: LocalAvatarGLBProps
       return false
     }
   }, [])
+
+  useEffect(() => {
+    if (!webglOk) onWebGLUnavailable?.()
+  }, [onWebGLUnavailable, webglOk])
 
   if (!webglOk) {
     return (
@@ -54,13 +79,14 @@ export default function LocalAvatarGLB({ speaking = false }: LocalAvatarGLBProps
   return (
     <div className="h-full w-full">
       <Canvas
-        camera={{ position: [0, 0, 2.5], fov: 50 }}
+        camera={{ position: [0, 0.15, 3.2], fov: 35 }}
         style={{ background: '#1a1a2e' }}
       >
         <ambientLight intensity={0.8} />
-        <directionalLight position={[5, 5, 5]} intensity={1} />
+        <hemisphereLight args={['#ffffff', '#243044', 1.2]} />
+        <directionalLight position={[3, 4, 5]} intensity={1.6} />
         <GLBModel speaking={speaking} />
-        <OrbitControls />
+        <OrbitControls enablePan={false} enableZoom={false} target={[0, 0, 0]} />
       </Canvas>
     </div>
   )

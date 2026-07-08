@@ -189,7 +189,7 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
       <div className="flex flex-col flex-1 gap-4">
         <div className="relative flex-1 bg-black rounded-xl overflow-hidden min-h-0">
           {status === 'ready' ? (
-            <LocalAvatarGLB speaking={speaking} />
+            <LocalAvatarGLB speaking={speaking} onWebGLUnavailable={() => updateStatus('audio-only')} />
           ) : status === 'loading' ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-white bg-black/60">
               <Loader2 className="h-8 w-8 animate-spin" />
