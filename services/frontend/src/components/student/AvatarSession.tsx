@@ -7,7 +7,8 @@ import { cn } from '@/lib/utils'
 import { localAvatarConnect, speakInSession, getSessionHistory, endSession } from '@/lib/api'
 import type { Source } from '@/app/session/ChatBubble'
 import ChatBubble from '@/app/session/ChatBubble'
-import LocalAvatarGLB from '@/components/student/LocalAvatarGLB'
+import TalkingHeadAvatar from '@/components/student/TalkingHeadAvatar'
+import type { TalkingHeadAvatarHandle } from '@/components/student/TalkingHeadAvatar'
 
 interface Message { role: string; content: string; timestamp: string; sources?: Source[] }
 
@@ -17,6 +18,9 @@ interface Props {
 }
 
 type Status = 'loading' | 'ready' | 'error' | 'audio-only'
+
+const SILENT_WAV_DATA_URI =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQQAAAAAAA=='
 
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message
@@ -38,6 +42,8 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
   const cancelledRef = useRef(false)
   const isConnectingRef = useRef(false)
   const mediaStreamRef = useRef<MediaStream | null>(null)
+  const avatarRef = useRef<TalkingHeadAvatarHandle | null>(null)
+  const localAudioRef = useRef<HTMLAudioElement | null>(null)
 
   const [status, setStatus] = useState<Status>('loading')
   const [recording, setRecording] = useState(false)
@@ -103,9 +109,42 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
     mediaStreamRef.current = null
   }
 
+  async function unlockLocalAudio() {
+    if (!localAudioRef.current) {
+      localAudioRef.current = new Audio()
+      localAudioRef.current.preload = 'auto'
+    }
+
+    const audio = localAudioRef.current
+    if (!audio.paused || audio.currentTime > 0) return
+
+    audio.muted = true
+    audio.src = SILENT_WAV_DATA_URI
+    try {
+      await audio.play()
+      audio.pause()
+      audio.currentTime = 0
+    } finally {
+      audio.muted = false
+    }
+  }
+
   async function playAudioLocally(wavBuffer: ArrayBuffer) {
-    const audio = new Audio(URL.createObjectURL(new Blob([wavBuffer], { type: 'audio/wav' })))
-    audio.onended = () => setSpeaking(false)
+    const audio = localAudioRef.current ?? new Audio()
+    localAudioRef.current = audio
+
+    const objectUrl = URL.createObjectURL(new Blob([wavBuffer], { type: 'audio/wav' }))
+    audio.pause()
+    audio.src = objectUrl
+    audio.onended = () => {
+      setSpeaking(false)
+      URL.revokeObjectURL(objectUrl)
+    }
+    audio.onerror = () => {
+      setSpeaking(false)
+      URL.revokeObjectURL(objectUrl)
+    }
+
     setSpeaking(true)
     await audio.play()
   }
@@ -113,6 +152,12 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
   async function startRecording() {
     if (processing || (status !== 'ready' && status !== 'audio-only')) return
     try {
+      avatarRef.current?.unlockAudio().catch((error) => {
+        console.warn('Avatar audio unlock failed; playback may require another user gesture.', error)
+      })
+      unlockLocalAudio().catch((error) => {
+        console.warn('Local audio unlock failed; playback may require another user gesture.', error)
+      })
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       mediaStreamRef.current = stream
       const recorder = new MediaRecorder(stream)
@@ -163,9 +208,11 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
 
       const msgs = await getSessionHistory(sessionId)
       setHistory(msgs)
-
       if (result.kind === 'audio') {
-        await playAudioLocally(result.buffer)
+        void playAudioLocally(result.buffer).catch((error) => {
+          console.error('Failed to play spoken response.', error)
+          toast.error('No se pudo reproducir la respuesta de audio.')
+        })
       } else if (result.kind === 'text-only') {
         toast.warning('Audio was unavailable. The full answer is in the conversation.')
       }
@@ -189,7 +236,11 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
       <div className="flex flex-col flex-1 gap-4">
         <div className="relative flex-1 bg-black rounded-xl overflow-hidden min-h-0">
           {status === 'ready' ? (
-            <LocalAvatarGLB speaking={speaking} onWebGLUnavailable={() => updateStatus('audio-only')} />
+            <TalkingHeadAvatar
+              ref={avatarRef}
+              onUnavailable={() => updateStatus('audio-only')}
+              onSpeakingChange={setSpeaking}
+            />
           ) : status === 'loading' ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-white bg-black/60">
               <Loader2 className="h-8 w-8 animate-spin" />
@@ -208,10 +259,18 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
 
         <div className="flex items-center justify-center gap-4">
           <button
-            onMouseDown={startRecording}
-            onMouseUp={handlePushToTalkEnd}
-            onTouchStart={startRecording}
-            onTouchEnd={handlePushToTalkEnd}
+            onPointerDown={(event) => {
+              event.preventDefault()
+              void startRecording()
+            }}
+            onPointerUp={(event) => {
+              event.preventDefault()
+              void handlePushToTalkEnd()
+            }}
+            onPointerCancel={(event) => {
+              event.preventDefault()
+              if (recording) void handlePushToTalkEnd()
+            }}
             disabled={status === 'loading' || status === 'error' || processing}
             className={cn(
               'w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-all select-none',
