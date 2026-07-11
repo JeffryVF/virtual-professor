@@ -57,6 +57,10 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
     setStatus(s)
   }, [])
 
+  const handleAvatarUnavailable = useCallback(() => {
+    updateStatus('audio-only')
+  }, [updateStatus])
+
   useEffect(() => {
     cancelledRef.current = false
     void init()
@@ -126,6 +130,16 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
       audio.currentTime = 0
     } finally {
       audio.muted = false
+    }
+  }
+
+  async function getAudioDurationMs(wavBuffer: ArrayBuffer) {
+    const audioContext = new AudioContext()
+    try {
+      const decoded = await audioContext.decodeAudioData(wavBuffer.slice(0))
+      return decoded.duration * 1000
+    } finally {
+      await audioContext.close()
     }
   }
 
@@ -208,11 +222,31 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
 
       const msgs = await getSessionHistory(sessionId)
       setHistory(msgs)
+      const latestProfessorMessage = [...msgs]
+        .reverse()
+        .find((message) => message.role === 'professor' || message.role === 'assistant')
+      const speechText = latestProfessorMessage?.content ?? ''
+
       if (result.kind === 'audio') {
         void playAudioLocally(result.buffer).catch((error) => {
           console.error('Failed to play spoken response.', error)
           toast.error('No se pudo reproducir la respuesta de audio.')
         })
+
+        if (statusRef.current === 'ready') {
+          if (speechText) {
+            void avatarRef.current?.playSpeech({ audioBuffer: result.buffer.slice(0), text: speechText })
+              .catch((error) => {
+                console.warn('Avatar lip-sync animation failed.', error)
+              })
+          } else {
+            void getAudioDurationMs(result.buffer).then((durationMs) => {
+              avatarRef.current?.animateMouth(durationMs)
+            }).catch((error) => {
+              console.warn('Avatar mouth animation failed.', error)
+            })
+          }
+        }
       } else if (result.kind === 'text-only') {
         toast.warning('Audio was unavailable. The full answer is in the conversation.')
       }
@@ -238,7 +272,7 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
           {status === 'ready' ? (
             <TalkingHeadAvatar
               ref={avatarRef}
-              onUnavailable={() => updateStatus('audio-only')}
+              onUnavailable={handleAvatarUnavailable}
               onSpeakingChange={setSpeaking}
             />
           ) : status === 'loading' ? (

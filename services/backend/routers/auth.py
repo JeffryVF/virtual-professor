@@ -36,6 +36,12 @@ router = APIRouter()
 @limiter.limit(_REGISTER_LIMIT)
 async def register(request: Request, data: UserCreate, db: AsyncSession = Depends(get_db)):
     """Register a new user."""
+    if data.role.value != "student":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public registration is limited to student accounts",
+        )
+
     # Check duplicate email
     result = await db.execute(select(User).where(User.email == data.email))
     if result.scalar_one_or_none():

@@ -49,12 +49,44 @@ const ALWAYS_MORPHS = [
 export interface TalkingHeadAvatarHandle {
   unlockAudio: () => Promise<void>
   playSpeech: (input: { audioBuffer: ArrayBuffer; text: string }) => Promise<void>
+  animateMouth: (durationMs: number) => void
   stop: () => void
 }
 
 interface TalkingHeadAvatarProps {
   onUnavailable?: (reason?: string) => void
   onSpeakingChange?: (speaking: boolean) => void
+}
+
+type MorphTargetState = {
+  ms?: number[][]
+  is?: number[]
+  value?: number
+  applied?: number
+  fixed?: number | null
+  system?: number | null
+  newvalue?: number | null
+  needsUpdate?: boolean
+}
+
+function applyMorphDirect(head: TalkingHead, morph: string, value: number) {
+  const state = head.mtAvatar?.[morph] as MorphTargetState | undefined
+  if (!state) return
+
+  const clamped = Math.max(0, Math.min(1, value))
+  state.value = clamped
+  state.applied = clamped
+  state.fixed = clamped
+  state.system = null
+  state.newvalue = null
+  state.needsUpdate = false
+
+  state.ms?.forEach((influences, index) => {
+    const morphIndex = state.is?.[index]
+    if (morphIndex !== undefined) {
+      influences[morphIndex] = clamped
+    }
+  })
 }
 
 function buildWordTimings(text: string, totalMs: number) {
@@ -140,6 +172,9 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
     const headRef = useRef<TalkingHead | null>(null)
     const speakingTimerRef = useRef<number | null>(null)
     const readyRef = useRef(false)
+    const mouthAnimationRef = useRef<number | null>(null)
+    const onUnavailableRef = useRef(onUnavailable)
+    const onSpeakingChangeRef = useRef(onSpeakingChange)
 
     const [isReady, setIsReady] = useState(false)
     const [loadingMessage, setLoadingMessage] = useState('Loading 3D avatar...')
@@ -155,6 +190,76 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
       }
     }, [])
 
+    useEffect(() => {
+      onUnavailableRef.current = onUnavailable
+      onSpeakingChangeRef.current = onSpeakingChange
+    }, [onSpeakingChange, onUnavailable])
+
+    const stopMouthAnimation = useCallback(() => {
+      if (mouthAnimationRef.current !== null) {
+        window.cancelAnimationFrame(mouthAnimationRef.current)
+        mouthAnimationRef.current = null
+      }
+
+      const head = headRef.current
+      if (!head) return
+
+      for (const morph of [
+        'viseme_aa',
+        'viseme_E',
+        'viseme_I',
+        'viseme_O',
+        'viseme_U',
+        'viseme_PP',
+        'jawOpen',
+        'mouthOpen',
+        'mouthFunnel',
+        'mouthPucker',
+      ]) {
+        applyMorphDirect(head, morph, 0)
+      }
+    }, [])
+
+    const animateMouth = useCallback((durationMs: number) => {
+      const head = headRef.current
+      if (!head || !readyRef.current) return
+
+      stopMouthAnimation()
+      const startedAt = performance.now()
+      const safeDurationMs = Math.max(300, durationMs)
+      const visemes = ['viseme_aa', 'viseme_E', 'viseme_O', 'viseme_U', 'viseme_I']
+
+      const tick = (now: number) => {
+        const elapsed = now - startedAt
+        if (elapsed >= safeDurationMs) {
+          stopMouthAnimation()
+          return
+        }
+
+        const syllableIndex = Math.floor(elapsed / 145)
+        const activeViseme = visemes[syllableIndex % visemes.length]
+        const pulse = Math.pow((Math.sin(elapsed / 48) + 1) / 2, 0.75)
+        const attack = Math.min(1, elapsed / 180)
+        const release = Math.min(1, (safeDurationMs - elapsed) / 240)
+        const envelope = Math.max(0, Math.min(attack, release))
+        const value = Math.min(0.36, pulse * envelope * 0.42)
+
+        for (const morph of visemes) {
+          applyMorphDirect(head, morph, morph === activeViseme ? value : 0)
+        }
+
+        applyMorphDirect(head, 'jawOpen', value * 0.35)
+        applyMorphDirect(head, 'mouthOpen', value * 0.28)
+        applyMorphDirect(head, 'mouthFunnel', activeViseme === 'viseme_O' ? value * 0.2 : 0)
+        applyMorphDirect(head, 'mouthPucker', activeViseme === 'viseme_U' ? value * 0.2 : 0)
+        applyMorphDirect(head, 'viseme_PP', syllableIndex % 7 === 0 ? value * 0.3 : 0)
+
+        mouthAnimationRef.current = window.requestAnimationFrame(tick)
+      }
+
+      mouthAnimationRef.current = window.requestAnimationFrame(tick)
+    }, [stopMouthAnimation])
+
     const clearSpeakingTimer = useCallback(() => {
       if (speakingTimerRef.current !== null) {
         window.clearTimeout(speakingTimerRef.current)
@@ -164,10 +269,11 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
 
     const stopSpeech = useCallback(() => {
       clearSpeakingTimer()
+      stopMouthAnimation()
       setSubtitle('')
-      onSpeakingChange?.(false)
+      onSpeakingChangeRef.current?.(false)
       headRef.current?.stopSpeaking()
-    }, [clearSpeakingTimer, onSpeakingChange])
+    }, [clearSpeakingTimer, stopMouthAnimation])
 
     useImperativeHandle(
       ref,
@@ -178,6 +284,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
             await audioContext.resume()
           }
         },
+        animateMouth,
         async playSpeech({ audioBuffer, text }) {
           const head = headRef.current
           if (!head || !readyRef.current) {
@@ -190,7 +297,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
 
           clearSpeakingTimer()
           setSubtitle(text)
-          onSpeakingChange?.(true)
+          onSpeakingChangeRef.current?.(true)
 
           const decodedAudio = await head.audioCtx.decodeAudioData(audioBuffer.slice(0))
           const totalMs = decodedAudio.duration * 1000
@@ -210,7 +317,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
           await new Promise<void>((resolve) => {
             speakingTimerRef.current = window.setTimeout(() => {
               setSubtitle('')
-              onSpeakingChange?.(false)
+              onSpeakingChangeRef.current?.(false)
               speakingTimerRef.current = null
               resolve()
             }, Math.max(300, Math.ceil(totalMs + 250)))
@@ -220,7 +327,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
           stopSpeech()
         },
       }),
-      [clearSpeakingTimer, onSpeakingChange, stopSpeech]
+      [animateMouth, clearSpeakingTimer, onSpeakingChange, stopSpeech]
     )
 
     useEffect(() => {
@@ -228,7 +335,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
         const reason = '3D rendering unavailable — audio-only mode active'
         setIsReady(false)
         setInitError(reason)
-        onUnavailable?.(reason)
+        onUnavailableRef.current?.(reason)
         return
       }
 
@@ -250,7 +357,9 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
             cameraRotateEnable: false,
             cameraPanEnable: false,
             cameraZoomEnable: false,
-            mixerGainSpeech: 3,
+            // Audible playback is handled by AvatarSession's HTMLAudioElement.
+            // TalkingHead receives the same WAV silently so it can drive visemes only.
+            mixerGainSpeech: 0,
             lightAmbientColor: 0xffffff,
             lightAmbientIntensity: 1.5,
             lightDirectColor: 0x8899cc,
@@ -299,7 +408,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
           if (cancelled) return
           setIsReady(false)
           setInitError(message)
-          onUnavailable?.(message)
+          onUnavailableRef.current?.(message)
         }
       }
 
@@ -325,7 +434,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
         headRef.current?.dispose()
         headRef.current = null
       }
-    }, [onSpeakingChange, onUnavailable, stopSpeech, webglOk])
+    }, [stopSpeech, webglOk])
 
     if (initError) {
       return (

@@ -87,11 +87,11 @@ export async function login(credentials: LoginCredentials): Promise<{ user: Auth
   }
 }
 
-export async function register(data: { email: string; password: string; name: string; role?: string }): Promise<AuthUser> {
+export async function register(data: { email: string; password: string; name: string }): Promise<AuthUser> {
   const res = await fetch(`${API_BASE}/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...data, role: data.role ?? 'student' }),
+    body: JSON.stringify(data),
   })
   if (!res.ok) {
     throw await authError(res, 'Registration failed')

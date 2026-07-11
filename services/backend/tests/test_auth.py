@@ -47,6 +47,22 @@ async def test_register_weak_password(async_client):
     assert response.status_code == 422
 
 
+@pytest.mark.asyncio
+async def test_register_rejects_privileged_role(async_client):
+    """Public registration must not allow users to self-assign privileged roles."""
+    response = await async_client.post(
+        "/auth/register",
+        json={
+            "email": "attacker@test.com",
+            "password": "securepass",
+            "name": "Privilege Escalation",
+            "role": "admin",
+        },
+    )
+    assert response.status_code == 403
+    assert "student" in response.json()["detail"].lower()
+
+
 # ── Login ─────────────────────────────────────────────────────────────────────
 
 

@@ -78,6 +78,26 @@ async def test_document_error(db_session, test_professor):
     return doc
 
 
+@pytest.mark.asyncio
+async def test_upload_document_returns_409_when_professor_document_limit_reached(
+    async_client, admin_token, test_professor, monkeypatch
+):
+    """GIVEN a professor at the document limit
+    WHEN uploading another document
+    THEN the API returns 409 instead of raising an internal NameError.
+    """
+    monkeypatch.setattr("routers.admin.settings.professor_max_documents", 0)
+
+    response = await async_client.post(
+        f"/admin/professors/{test_professor.id}/documents",
+        files={"file": ("test.pdf", b"%PDF-1.4 test content", "application/pdf")},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+
+    assert response.status_code == 409
+    assert "max" in response.json()["detail"].lower()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # GET /admin/documents/{document_id}/chunks
 # ══════════════════════════════════════════════════════════════════════════════

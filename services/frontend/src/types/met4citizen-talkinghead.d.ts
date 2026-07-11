@@ -50,6 +50,7 @@ declare module '@met4citizen/talkinghead' {
     lipsync: Record<string, unknown>
     mtAvatar?: Record<string, unknown>
     mtRandomized: string[]
+    setValue(morphTarget: string, value: number, transitionMs?: number | null): void
     showAvatar(
       avatar: TalkingHeadAvatarConfig,
       onprogress?: (event: ProgressEvent<EventTarget>) => void
