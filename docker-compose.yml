@@ -29,6 +29,8 @@ services:
   backend:
     build: ./services/backend
     env_file: .env
+    environment:
+      - ROOT_PATH=/api
     volumes:
       - uploads_data:/app/uploads
     depends_on:

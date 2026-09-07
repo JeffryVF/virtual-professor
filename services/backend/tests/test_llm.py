@@ -12,6 +12,22 @@ from services.llm import generate_response, is_in_scope
 GRACEFUL_MESSAGE = "No encontré información sobre eso en mis fuentes"
 
 
+def _zai_response(content: str) -> dict:
+    return {"choices": [{"message": {"content": content}}]}
+
+
+def _payload(mock_client) -> dict:
+    return mock_client.post.call_args[1]["json"]
+
+
+def _system_content(mock_client) -> str:
+    return _payload(mock_client)["messages"][0]["content"]
+
+
+def _user_content(mock_client) -> str:
+    return _payload(mock_client)["messages"][1]["content"]
+
+
 class TestEmptyContextEarlyReturn:
     """Tests for the early-return behavior when context is empty."""
 
@@ -19,7 +35,7 @@ class TestEmptyContextEarlyReturn:
     async def test_empty_context_returns_graceful_message(self):
         """GIVEN empty context_chunks list
         WHEN generate_response is called
-        THEN the graceful message is returned without calling Ollama.
+        THEN the graceful message is returned without calling the LLM.
         """
         result = await generate_response(
             system_prompt="You are a helpful assistant",
@@ -30,17 +46,14 @@ class TestEmptyContextEarlyReturn:
         assert result == GRACEFUL_MESSAGE
 
     @pytest.mark.asyncio
-    async def test_non_empty_context_calls_ollama(self):
+    async def test_non_empty_context_calls_llm(self):
         """GIVEN a context list with at least one chunk
         WHEN generate_response is called
-        THEN Ollama is called and the response is returned normally.
+        THEN Z.AI is called and the response is returned normally.
         """
-        mock_response_data = {
-            "response": "Photosynthesis is the process plants use to convert light into energy."
-        }
-
+        content = "Photosynthesis is the process plants use to convert light into energy."
         mock_response = MagicMock()
-        mock_response.json.return_value = mock_response_data
+        mock_response.json.return_value = _zai_response(content)
 
         with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -60,14 +73,19 @@ class TestEmptyContextEarlyReturn:
                 query="What is photosynthesis?",
             )
 
-        assert result == mock_response_data["response"]
+        assert result == content
         mock_client.post.assert_called_once()
+        payload = _payload(mock_client)
+        assert payload["model"]
+        assert payload["thinking"] == {"type": "disabled"}
+        assert payload["messages"][0]["role"] == "system"
+        assert payload["messages"][1]["role"] == "user"
 
     @pytest.mark.asyncio
-    async def test_empty_context_does_not_call_ollama(self):
+    async def test_empty_context_does_not_call_llm(self):
         """GIVEN empty context_chunks
         WHEN generate_response is called
-        THEN Ollama is NOT called.
+        THEN the LLM is NOT called.
         """
         with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -99,9 +117,10 @@ class TestLabeledContext:
         WHEN the context is assembled for the LLM
         THEN the context string SHALL be "[Source: lecture.pdf]\\n{text}".
         """
-        mock_response_data = {"response": "Neural networks use backpropagation."}
         mock_response = MagicMock()
-        mock_response.json.return_value = mock_response_data
+        mock_response.json.return_value = _zai_response(
+            "Neural networks use backpropagation."
+        )
 
         chunks = [
             ContextChunk(
@@ -116,28 +135,26 @@ class TestLabeledContext:
             mock_client_cls.return_value.__aenter__.return_value = mock_client
             mock_client.post = AsyncMock(return_value=mock_response)
 
-            result = await generate_response(
+            await generate_response(
                 system_prompt="You are a helpful assistant",
                 history=[],
                 context_chunks=chunks,
                 query="What is backpropagation?",
             )
 
-        # Verify the prompt sent to Ollama has the [Source:] label
-        call_kwargs = mock_client.post.call_args[1]
-        payload = call_kwargs["json"]
-        assert "[Source: lecture.pdf]\nNeural networks use backpropagation." in payload["prompt"]
+        assert "[Source: lecture.pdf]\nNeural networks use backpropagation." in _user_content(
+            mock_client
+        )
 
     @pytest.mark.asyncio
     async def test_multiple_chunks_with_distinct_source_labels(self):
         """GIVEN two ContextChunks from different sources
         WHEN context is assembled
         THEN each chunk has its own [Source: ...] label
-        AND chunks are separated by \n\n.
+        AND chunks are separated by \\n\\n.
         """
-        mock_response_data = {"response": "Answer"}
         mock_response = MagicMock()
-        mock_response.json.return_value = mock_response_data
+        mock_response.json.return_value = _zai_response("Answer")
 
         chunks = [
             ContextChunk(
@@ -157,28 +174,26 @@ class TestLabeledContext:
             mock_client_cls.return_value.__aenter__.return_value = mock_client
             mock_client.post = AsyncMock(return_value=mock_response)
 
-            result = await generate_response(
+            await generate_response(
                 system_prompt="Assistant",
                 history=[],
                 context_chunks=chunks,
                 query="Test",
             )
 
-        call_kwargs = mock_client.post.call_args[1]
-        payload = call_kwargs["json"]
-        assert "[Source: paper.pdf]\nAttention is all you need." in payload["prompt"]
-        assert "[Source: slides.pdf]\nCNNs for image recognition." in payload["prompt"]
+        user_content = _user_content(mock_client)
+        assert "[Source: paper.pdf]\nAttention is all you need." in user_content
+        assert "[Source: slides.pdf]\nCNNs for image recognition." in user_content
 
     @pytest.mark.asyncio
     async def test_citation_instruction_appended_to_system_prompt(self):
         """GIVEN a SystemPrompt template
-        WHEN the prompt is compiled for Ollama
+        WHEN the prompt is compiled for Z.AI
         THEN the system prompt SHALL instruct the LLM to reference [Source: ...]
         AND the instruction SHALL be in natural Spanish.
         """
-        mock_response_data = {"response": "Answer with sources"}
         mock_response = MagicMock()
-        mock_response.json.return_value = mock_response_data
+        mock_response.json.return_value = _zai_response("Answer with sources")
 
         chunks = [
             ContextChunk(
@@ -193,17 +208,16 @@ class TestLabeledContext:
             mock_client_cls.return_value.__aenter__.return_value = mock_client
             mock_client.post = AsyncMock(return_value=mock_response)
 
-            result = await generate_response(
+            await generate_response(
                 system_prompt="Eres un profesor.",
                 history=[],
                 context_chunks=chunks,
                 query="Test query",
             )
 
-        call_kwargs = mock_client.post.call_args[1]
-        payload = call_kwargs["json"]
-        assert "etiqueta [Source:" in payload["system"]
-        assert "No inventes fuentes" in payload["system"]
+        system = _system_content(mock_client)
+        assert "etiqueta [Source:" in system
+        assert "No inventes fuentes" in system
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -220,9 +234,8 @@ class TestUnlabeledChunks:
         WHEN the context is assembled for the LLM
         THEN the [Source: ...] prefix SHALL be omitted entirely.
         """
-        mock_response_data = {"response": "Answer without source"}
         mock_response = MagicMock()
-        mock_response.json.return_value = mock_response_data
+        mock_response.json.return_value = _zai_response("Answer without source")
 
         chunks = [
             ContextChunk(
@@ -237,16 +250,14 @@ class TestUnlabeledChunks:
             mock_client_cls.return_value.__aenter__.return_value = mock_client
             mock_client.post = AsyncMock(return_value=mock_response)
 
-            result = await generate_response(
+            await generate_response(
                 system_prompt="Assistant",
                 history=[],
                 context_chunks=chunks,
                 query="Test",
             )
 
-        call_kwargs = mock_client.post.call_args[1]
-        payload = call_kwargs["json"]
-        context_in_prompt = payload["prompt"].split("Knowledge:\n")[1]
+        context_in_prompt = _user_content(mock_client).split("Knowledge:\n")[1]
 
         # The chunk text should appear WITHOUT any [Source: ...] prefix
         assert "[Source:" not in context_in_prompt
@@ -271,9 +282,9 @@ class TestLangfuseSpans:
         mock_trace = MagicMock()
         mock_trace.span.return_value = mock_span
 
-        mock_response_data = {"response": "Photosynthesis is a process."}
+        content = "Photosynthesis is a process."
         mock_response = MagicMock()
-        mock_response.json.return_value = mock_response_data
+        mock_response.json.return_value = _zai_response(content)
 
         with (
             patch("services.llm.httpx.AsyncClient") as mock_client_cls,
@@ -298,7 +309,7 @@ class TestLangfuseSpans:
                 trace=mock_trace,
             )
 
-        assert result == mock_response_data["response"]
+        assert result == content
         mock_trace.span.assert_called_once()
         span_name = mock_trace.span.call_args[1].get("name", "")
         assert "llm_generate" in span_name or mock_trace.span.called
@@ -310,9 +321,9 @@ class TestLangfuseSpans:
         WHEN generate_response is called
         THEN no span is created and the function works normally.
         """
-        mock_response_data = {"response": "Normal response."}
+        content = "Normal response."
         mock_response = MagicMock()
-        mock_response.json.return_value = mock_response_data
+        mock_response.json.return_value = _zai_response(content)
 
         with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -333,7 +344,7 @@ class TestLangfuseSpans:
                 trace=None,
             )
 
-        assert result == mock_response_data["response"]
+        assert result == content
         mock_client.post.assert_called_once()
 
     @pytest.mark.asyncio
@@ -346,9 +357,8 @@ class TestLangfuseSpans:
         mock_trace = MagicMock()
         mock_trace.span.return_value = mock_span
 
-        mock_response_data = {"response": "yes"}
         mock_response = MagicMock()
-        mock_response.json.return_value = mock_response_data
+        mock_response.json.return_value = _zai_response("yes")
 
         with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
@@ -378,7 +388,7 @@ class TestLangfuseSpans:
             mock_client = AsyncMock()
             mock_client_cls.return_value.__aenter__.return_value = mock_client
             mock_client.post = AsyncMock(return_value=MagicMock())
-            mock_client.post.return_value.json.return_value = {"response": "yes"}
+            mock_client.post.return_value.json.return_value = _zai_response("yes")
 
             result = await is_in_scope(
                 "What is quantum physics?",

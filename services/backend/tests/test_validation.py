@@ -183,7 +183,7 @@ class TestPostParseValidation:
         with (
             patch("services.ingestion.AsyncSessionLocal", return_value=mock_session),
             patch("services.ingestion.QdrantClient"),
-            patch("services.ingestion.OllamaEmbedding"),
+            patch("services.ingestion.get_embed_model"),
             patch("services.ingestion._ensure_collection", new=AsyncMock()),
             patch("services.ingestion._validate_document", return_value=(True, "")),
             patch("services.ingestion.SentenceSplitter.get_nodes_from_documents") as mock_splitter,
@@ -233,7 +233,7 @@ class TestPostParseValidation:
         with (
             patch("services.ingestion.AsyncSessionLocal", return_value=mock_session),
             patch("services.ingestion.QdrantClient"),
-            patch("services.ingestion.OllamaEmbedding"),
+            patch("services.ingestion.get_embed_model"),
             patch("services.ingestion._ensure_collection", new=AsyncMock()),
             patch("services.ingestion._validate_document", return_value=(True, "")),
             patch("services.ingestion.SentenceSplitter.get_nodes_from_documents") as mock_splitter,
@@ -291,7 +291,7 @@ class TestUploadEndpoint:
         # These patches apply to ALL tests in this class
         self._patchers = [
             patch("services.ingestion.QdrantClient"),
-            patch("services.ingestion.OllamaEmbedding"),
+            patch("services.ingestion.get_embed_model"),
             patch("services.ingestion._ensure_collection", new=AsyncMock()),
             patch("services.ingestion._transcribe_media", new=AsyncMock(return_value="")),
             # Mock ingest_document so the background task doesn't hit the real DB
@@ -307,7 +307,7 @@ class TestUploadEndpoint:
     async def _create_professor(self, client: httpx.AsyncClient) -> UUID:
         """Create a professor and return its ID."""
         resp = await client.post(
-            "/api/admin/professors",
+            "/admin/professors",
             json={
                 "name": "Test Prof",
                 "topic": "Testing",
@@ -329,7 +329,7 @@ class TestUploadEndpoint:
     ) -> httpx.Response:
         """Helper to upload a file to the documents endpoint."""
         return await client.post(
-            f"/api/admin/professors/{professor_id}/documents",
+            f"/admin/professors/{professor_id}/documents",
             files={"file": (filename, content, "application/octet-stream")},
             headers={"X-Admin-Key": self.ADMIN_KEY},
         )

@@ -1,7 +1,7 @@
 """
 Async test fixtures for Virtual Professor API.
 
-External services (Ollama, Qdrant, Redis, Whisper, Kokoro)
+External services (Z.AI, Qdrant, Redis, Whisper, Kokoro)
 are mocked to keep tests fast, deterministic, and dependency-free.
 """
 
@@ -16,9 +16,9 @@ from fastapi import FastAPI
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
 os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
-os.environ.setdefault("OLLAMA_URL", "http://localhost:11434")
-os.environ.setdefault("OLLAMA_LLM_MODEL", "test-model")
-os.environ.setdefault("OLLAMA_EMBED_MODEL", "test-embed")
+os.environ.setdefault("ZAI_API_KEY", "test-zai-key")
+os.environ.setdefault("ZAI_LLM_MODEL", "glm-4.7-flash")
+os.environ.setdefault("ZAI_EMBED_MODEL", "embedding-3")
 os.environ.setdefault("WHISPER_URL", "http://localhost:9000")
 os.environ.setdefault("KOKORO_URL", "http://localhost:8880")
 os.environ.setdefault("DEBUG", "true")

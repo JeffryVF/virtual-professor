@@ -1,4 +1,4 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? '/api'
+import { API_BASE } from '@/lib/api-base'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

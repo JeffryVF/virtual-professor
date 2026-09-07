@@ -194,7 +194,7 @@ async def test_retrieve_context_applies_filter_integration():
     with (
         patch("services.rag.AsyncQdrantClient") as mock_qdrant_cls,
         patch("services.rag.QdrantVectorStore") as mock_store_cls,
-        patch("services.rag.OllamaEmbedding") as mock_embed_cls,
+        patch("services.rag.get_embed_model") as mock_embed_cls,
         patch("services.rag.VectorStoreIndex.from_vector_store", return_value=mock_index),
     ):
         mock_client = MagicMock()
@@ -232,7 +232,7 @@ class TestRetrieveContextWithReranker:
     _qdrant_patches = (
         "services.rag.AsyncQdrantClient",
         "services.rag.QdrantVectorStore",
-        "services.rag.OllamaEmbedding",
+        "services.rag.get_embed_model",
         "services.rag.VectorStoreIndex.from_vector_store",
     )
 
@@ -775,7 +775,7 @@ class TestRetrieveContextTypedChunks:
     _qdrant_patches = (
         "services.rag.AsyncQdrantClient",
         "services.rag.QdrantVectorStore",
-        "services.rag.OllamaEmbedding",
+        "services.rag.get_embed_model",
         "services.rag.VectorStoreIndex.from_vector_store",
     )
 
@@ -887,7 +887,7 @@ class TestFallbackChain:
     _qdrant_patches = (
         "services.rag.AsyncQdrantClient",
         "services.rag.QdrantVectorStore",
-        "services.rag.OllamaEmbedding",
+        "services.rag.get_embed_model",
         "services.rag.VectorStoreIndex.from_vector_store",
     )
 
@@ -1041,7 +1041,7 @@ class TestEmptyQueryHandling:
     _qdrant_patches = (
         "services.rag.AsyncQdrantClient",
         "services.rag.QdrantVectorStore",
-        "services.rag.OllamaEmbedding",
+        "services.rag.get_embed_model",
         "services.rag.VectorStoreIndex.from_vector_store",
     )
 

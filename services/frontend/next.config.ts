@@ -1,13 +1,18 @@
 import type { NextConfig } from 'next'
 
-// API calls are handled by nginx (port 80): location /api/ → backend:8000
-// When on port 3000 (local dev), these rewrites provide the same routing.
-// BACKEND_INTERNAL_URL is set in docker-compose.yml.
+// Docker/local: relative /api is rewritten to FastAPI.
+// Vercel: NEXT_PUBLIC_API_URL is the public Render origin, so no rewrite
+// (uploads and /speak audio exceed Vercel body limits if proxied).
+const publicApi = process.env.NEXT_PUBLIC_API_URL ?? ''
+const useApiRewrites = !publicApi.startsWith('http')
 const backendUrl = process.env.BACKEND_INTERNAL_URL || 'http://localhost:8000'
 
 const nextConfig: NextConfig = {
-  output: 'standalone',
+  ...(process.env.VERCEL ? {} : { output: 'standalone' as const }),
   async rewrites() {
+    if (!useApiRewrites) {
+      return []
+    }
     return [
       {
         source: '/api/:path*',

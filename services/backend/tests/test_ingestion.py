@@ -48,7 +48,7 @@ async def test_source_filename_injected_into_node_metadata():
     with (
         patch("services.ingestion.AsyncSessionLocal", return_value=mock_session),
         patch("services.ingestion.QdrantClient"),
-        patch("services.ingestion.OllamaEmbedding"),
+        patch("services.ingestion.get_embed_model"),
         patch("services.ingestion._ensure_collection", new=AsyncMock()),
         patch("services.ingestion._validate_document", return_value=(True, "")),
         patch("services.ingestion.SentenceSplitter.get_nodes_from_documents") as mock_splitter,

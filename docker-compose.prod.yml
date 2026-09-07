@@ -30,7 +30,7 @@ x-security: &security
 #   light    – nginx, redis, kokoro, langfuse:         cpus 0.5, memory 512M
 #   medium   – backend, frontend:                       cpus 1,   memory 1G
 #   heavy    – postgres, qdrant:                        cpus 1,   memory 2G
-#   xheavy   – ollama, whisper:                         cpus 2,   memory 4G
+#   xheavy   – whisper:                                 cpus 2,   memory 4G
 # ───────────────────────────────────────────────────────────────────────────
 
 x-light-limits: &light-limits

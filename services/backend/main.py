@@ -80,7 +80,7 @@ app = FastAPI(
     description="AI-powered virtual professor with RAG and local 3D avatar",
     version="0.1.0",
     lifespan=lifespan,
-    root_path="/api",
+    root_path=settings.root_path,
 )
 
 # ── Rate limit exception handler ───────────────────────────────────────────

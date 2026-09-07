@@ -1,7 +1,6 @@
 import { getAccessToken, refreshTokens, clearTokens } from '@/lib/auth'
 import { handleApiError } from '@/lib/error-handler'
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? '/api'
+import { API_BASE } from '@/lib/api-base'
 
 export type Language = 'es' | 'en' | 'both'
 export type DocumentStatus = 'pending' | 'processing' | 'ready' | 'error'

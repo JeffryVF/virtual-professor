@@ -55,10 +55,14 @@ async def _probe_qdrant() -> dict:
         await client.close()
 
 
-async def _probe_ollama() -> dict:
-    """Check ollama connectivity via GET /api/tags."""
+async def _probe_zai() -> dict:
+    """Check Z.AI connectivity via GET /models."""
+    base = settings.zai_base_url.rstrip("/")
     async with httpx.AsyncClient(timeout=_SERVICE_TIMEOUT) as client:
-        response = await client.get(f"{settings.ollama_url}/api/tags")
+        response = await client.get(
+            f"{base}/models",
+            headers={"Authorization": f"Bearer {settings.zai_api_key}"},
+        )
         response.raise_for_status()
     return {"status": "healthy"}
 
@@ -67,6 +71,14 @@ async def _probe_kokoro() -> dict:
     """Check kokoro TTS connectivity via GET /health."""
     async with httpx.AsyncClient(timeout=_SERVICE_TIMEOUT) as client:
         response = await client.get(f"{settings.kokoro_url}/health")
+        response.raise_for_status()
+    return {"status": "healthy"}
+
+
+async def _probe_whisper() -> dict:
+    """Check Whisper ASR connectivity via GET /docs (image has no /health)."""
+    async with httpx.AsyncClient(timeout=_SERVICE_TIMEOUT) as client:
+        response = await client.get(f"{settings.whisper_url.rstrip('/')}/docs")
         response.raise_for_status()
     return {"status": "healthy"}
 
@@ -106,8 +118,9 @@ async def health():
         _run_probe("postgres", _probe_postgres()),
         _run_probe("redis", _probe_redis()),
         _run_probe("qdrant", _probe_qdrant()),
-        _run_probe("ollama", _probe_ollama()),
+        _run_probe("zai", _probe_zai()),
         _run_probe("kokoro", _probe_kokoro()),
+        _run_probe("whisper", _probe_whisper()),
     )
     services = dict(raw)
     all_healthy = all(s["status"] == "healthy" for s in services.values())

@@ -12,6 +12,44 @@ log = logging.getLogger(__name__)
 GRACEFUL_NO_CONTEXT = "No encontré información sobre eso en mis fuentes"
 
 
+def _chat_url() -> str:
+    return f"{settings.zai_base_url.rstrip('/')}/chat/completions"
+
+
+def _chat_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {settings.zai_api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _extract_content(data: dict) -> str:
+    """Pull the assistant text from a Z.AI / OpenAI-compatible response."""
+    message = data["choices"][0]["message"]
+    return (message.get("content") or "").strip()
+
+
+async def _chat_complete(
+    messages: list[dict],
+    *,
+    max_tokens: int | None = None,
+    timeout: float = 60,
+) -> str:
+    """Call Z.AI chat completions with thinking disabled (voice-friendly)."""
+    payload = {
+        "model": settings.zai_llm_model,
+        "messages": messages,
+        "thinking": {"type": "disabled"},
+        "max_tokens": max_tokens or settings.llm_max_tokens,
+        "temperature": 0.6,
+        "stream": False,
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(_chat_url(), json=payload, headers=_chat_headers())
+        response.raise_for_status()
+        return _extract_content(response.json())
+
+
 async def generate_response(
     system_prompt: str,
     history: list[dict],
@@ -19,11 +57,11 @@ async def generate_response(
     query: str,
     trace: "LangfuseTrace | None" = None,
 ) -> str:
-    """Build a prompt with RAG context and conversation history, call Ollama.
+    """Build a prompt with RAG context and conversation history, call Z.AI.
 
     Each ``ContextChunk`` is prefixed with a ``[Source: filename]`` label when
     ``source_document`` is non-empty.  If ``context_chunks`` is empty, returns
-    a graceful message immediately without calling Ollama.
+    a graceful message immediately without calling the LLM.
 
     When ``trace`` is provided (Langfuse enabled), a child span is created
     with token counts and model name.
@@ -42,7 +80,7 @@ async def generate_response(
     context = "\n\n---\n\n".join(labeled_chunks)
 
     history_text = "\n".join(f"{msg['role']}: {msg['content']}" for msg in history)
-    prompt = (
+    user_prompt = (
         f"Conversation so far:\n{history_text}\n\n"
         f"Student question: {query}\n\n"
         f"Knowledge:\n{context}"
@@ -61,7 +99,19 @@ async def generate_response(
         "puedes ampliar, pero por defecto sé breve."
     )
 
-    input_tokens = estimate_tokens(prompt) + estimate_tokens(system_prompt)
+    system_content = (
+        f"{system_prompt}\n\n"
+        f"Use the following knowledge to answer the student's question. "
+        f"If the answer is not in the knowledge, say you don't have that information.\n\n"
+        f"{citation_instruction}\n\n"
+        f"{conciseness_instruction}"
+    )
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    input_tokens = estimate_tokens(user_prompt) + estimate_tokens(system_content)
 
     # ── Langfuse span ────────────────────────────────────────────────────
     if trace is not None:
@@ -69,26 +119,7 @@ async def generate_response(
 
         async with create_span(trace, "llm_generate") as span:
             try:
-                    async with httpx.AsyncClient(timeout=300) as client:
-                        response = await client.post(
-                            f"{settings.ollama_url}/api/generate",
-                            json={
-                                "model": settings.ollama_llm_model,
-                                "system": (
-                                    f"{system_prompt}\n\n"
-                                    f"Use the following knowledge to answer the student's question. "
-                                    f"If the answer is not in the knowledge, say you don't have that information.\n\n"
-                                    f"{citation_instruction}\n\n"
-                                    f"{conciseness_instruction}"
-                                ),
-                                "prompt": prompt,
-                                "stream": False,
-                                "options": {"num_predict": settings.llm_max_tokens},
-                            },
-                        )
-                        response.raise_for_status()
-                        data = response.json()
-                        output_text = data["response"]
+                output_text = await _chat_complete(messages, timeout=60)
             except Exception as exc:
                 if span is not None:
                     span.update(level="ERROR", status_message=str(exc))
@@ -97,35 +128,14 @@ async def generate_response(
             output_tokens = estimate_tokens(output_text)
             if span is not None:
                 span.update(
-                    input=prompt,
+                    input=user_prompt,
                     output=output_text,
-                    model=settings.ollama_llm_model,
+                    model=settings.zai_llm_model,
                     usage_details={"input": input_tokens, "output": output_tokens},
                 )
             return output_text
 
-    async with httpx.AsyncClient(timeout=300) as client:
-        response = await client.post(
-            f"{settings.ollama_url}/api/generate",
-            json={
-                "model": settings.ollama_llm_model,
-                "system": (
-                    f"{system_prompt}\n\n"
-                    f"Use the following knowledge to answer the student's question. "
-                    f"If the answer is not in the knowledge, say you don't have that information.\n\n"
-                    f"{citation_instruction}\n\n"
-                    f"{conciseness_instruction}"
-                ),
-                "prompt": prompt,
-                "stream": False,
-                "options": {"num_predict": settings.llm_max_tokens},
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        output_text = data["response"]
-
-    return output_text
+    return await _chat_complete(messages, timeout=60)
 
 
 # Stop words used when extracting topic keywords for the fast-path check.
@@ -136,7 +146,6 @@ _STOP_WORDS = frozenset({
     "the", "a", "an", "of", "in", "to", "for", "with", "on", "at",
     "introducción", "introduction", "intro", "i",
 })
-
 
 # Domain-specific keyword expansions: when a topic keyword is detected, related
 # technical terms are also accepted without needing the LLM fallback.
@@ -224,28 +233,24 @@ async def _llm_check_scope(query: str, topic: str) -> bool:
     keywords = _topic_keywords(topic)
     topic_short = keywords[0].capitalize() if keywords else topic
 
-    system_prompt = (
-        "You are a classifier. Determine if the student's question is about "
-        "the professor's topic. Answer YES or NO only."
-    )
-    prompt = (
-        f"Topic: {topic_short}\n"
-        f"Student: {query}\n"
-        f"Is this about {topic_short}? YES or NO:"
-    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a classifier. Determine if the student's question is about "
+                "the professor's topic. Answer YES or NO only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Topic: {topic_short}\n"
+                f"Student: {query}\n"
+                f"Is this about {topic_short}? YES or NO:"
+            ),
+        },
+    ]
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            f"{settings.ollama_url}/api/generate",
-            json={
-                "model": settings.ollama_llm_model,
-                "system": system_prompt,
-                "prompt": prompt,
-                "stream": False,
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        answer = data["response"].strip().upper()
-        log.info("Scope LLM check for %r on %r → %s", query[:80], topic, answer)
-        return answer.startswith("YES")
+    answer = (await _chat_complete(messages, max_tokens=8, timeout=30)).upper()
+    log.info("Scope LLM check for %r on %r → %s", query[:80], topic, answer)
+    return answer.startswith("YES")

@@ -2,7 +2,6 @@ import logging
 
 from llama_index.core import StorageContext, VectorStoreIndex
 from llama_index.core.schema import NodeWithScore
-from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -10,6 +9,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from core.config import settings
 from models.schemas import ContextChunk
 from services import langfuse as langfuse_helpers
+from services.embeddings import get_embed_model
 from services.reranker import BGELocalReranker
 
 log = logging.getLogger(__name__)
@@ -83,10 +83,7 @@ async def retrieve_context(
             )
             return []
 
-        embed_model = OllamaEmbedding(
-            model_name=settings.ollama_embed_model,
-            base_url=settings.ollama_url,
-        )
+        embed_model = get_embed_model()
         vector_store = QdrantVectorStore(
             collection_name=professor_collection,
             aclient=aclient,

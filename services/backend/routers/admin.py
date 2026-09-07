@@ -109,7 +109,7 @@ def validate_upload_file(
 
 router = APIRouter()
 
-UPLOAD_DIR = "/app/uploads"
+UPLOAD_DIR = settings.upload_dir
 
 # ── Professors ────────────────────────────────────────────────────────────────
 

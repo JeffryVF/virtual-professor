@@ -66,8 +66,8 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 └─────────┼───────────┼──────────────────┼──────────┼────────────┘
           │           │                  │          │
     ┌─────▼──┐  ┌─────▼──┐  ┌───────────▼──┐ ┌────▼────┐
-    │Whisper │  │ Ollama │  │    Qdrant    │ │ Kokoro  │
-    │  STT   │  │  LLM   │  │  Vector DB   │ │   TTS   │
+    │Whisper │  │  Z.AI  │  │    Qdrant    │ │ Kokoro  │
+    │  STT   │  │  GLM   │  │  Vector DB   │ │   TTS   │
     └────────┘  └────────┘  └──────┬───────┘ └─────────┘
                                    │
                             ┌──────▼──────┐   ┌─────────┐
@@ -96,7 +96,6 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 | `backend` | custom FastAPI | 8000 | Orchestrator, REST API, session management |
 | `frontend` | custom Next.js | 3000 | Student portal + Admin portal |
 | `whisper` | `onerahmet/openai-whisper` | 9000 | Speech-to-Text (ES/EN) |
-| `ollama` | `ollama/ollama` | 11434 | LLM inference (OpenAI-compatible API) |
 | `qdrant` | `qdrant/qdrant` | 6333 | Vector database, per-professor collections |
 | `kokoro` | custom wrapper | 8880 | Text-to-Speech (ES/EN voices) |
 | `postgres` | `postgres:16` | 5432 | Students, professors, sessions, messages |
@@ -116,10 +115,11 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 - Multilingual: auto-detects Spanish and English
 - Model: `base` for speed, `small` or `medium` for accuracy
 
-**ollama**
-- Hosts the LLM locally (e.g., `llama3.2`, `mistral`)
-- Also hosts the embedding model (`nomic-embed-text`) used for RAG
-- Exposes OpenAI-compatible API at `/v1`
+**Z.AI (GLM)**
+- Cloud LLM via the [Z.AI Open Platform](https://docs.z.ai/guides/llm/glm-5) (OpenAI-compatible chat completions)
+- Default model: `glm-4.7-flash` (free). Set `ZAI_LLM_MODEL=glm-5` to use GLM-5 (paid)
+- Also provides `embedding-3` for RAG so no local Ollama process is required
+- Thinking mode is disabled for short spoken professor replies
 
 **qdrant**
 - One collection per professor
@@ -210,7 +210,7 @@ timestamp      TIMESTAMP
 7.  LlamaIndex: embed query → retrieve top-k chunks from professor's Qdrant collection
 8.  Scope check (LLM or keyword): is the query related to the professor's topic?
     ├── IN SCOPE  → build prompt (system_prompt + history + retrieved context + query)
-    │              → Ollama LLM generates response text
+    │              → Z.AI GLM generates response text
     └── OUT OF SCOPE → static redirect: "Please ask questions related to [topic]."
 9.  Response text → Kokoro TTS → audio bytes
 10. Audio bytes returned to LiveAvatar LITE → avatar lip-syncs and speaks
@@ -240,7 +240,7 @@ Text extraction + cleaning
     ↓
 Chunking: 512 tokens, 50 token overlap, metadata tagging
     ↓
-Embedding: Ollama nomic-embed-text
+Embedding: Z.AI embedding-3
     ↓
 Upsert into professor's Qdrant collection
     ↓
@@ -290,6 +290,7 @@ Document status updated to "ready"
 virtual-professor/
 ├── docker-compose.yml
 ├── docker-compose.override.yml       ← dev overrides (hot-reload, debug)
+├── render.yaml                       ← Render Blueprint (API + Postgres + Redis + Qdrant + Whisper + Kokoro)
 ├── .env.example
 ├── README.md
 ├── AGENTS.md                         ← AI contributor guide
@@ -306,7 +307,8 @@ virtual-professor/
 │   │   ├── services/
 │   │   │   ├── stt.py                ← Whisper HTTP client
 │   │   │   ├── tts.py                ← Kokoro HTTP client
-│   │   │   ├── llm.py                ← Ollama client + prompt building
+│   │   │   ├── llm.py                ← Z.AI GLM client + prompt building
+│   │   │   ├── embeddings.py         ← Z.AI embedding-3 client (RAG)
 │   │   │   ├── rag.py                ← LlamaIndex + Qdrant retrieval
 │   │   │   ├── reranker.py           ← BGE cross-encoder reranker
 │   │   │   ├── memory.py             ← Redis session context manager
@@ -328,6 +330,7 @@ virtual-professor/
 │   │
 │   ├── frontend/
 │   │   ├── Dockerfile
+│   │   ├── vercel.json               ← Vercel project (Root Directory = services/frontend)
 │   │   ├── package.json
 │   │   ├── src/
 │   │   │   ├── app/
@@ -388,7 +391,6 @@ The stack is defined in [`docker-compose.yml`](./docker-compose.yml) at the repo
 | `frontend` | custom Node.js | Next.js app |
 | `backend` | custom Python | FastAPI orchestrator |
 | `whisper` | onerahmet/openai-whisper-asr-webservice | Speech-to-Text |
-| `ollama` | ollama/ollama | LLM + embeddings |
 | `qdrant` | qdrant/qdrant | Vector database |
 | `kokoro` | custom Python | Text-to-Speech |
 | `postgres` | postgres:16-alpine | Relational database |
@@ -417,10 +419,11 @@ REDIS_URL=redis://redis:6379
 # Qdrant
 QDRANT_URL=http://qdrant:6333
 
-# Ollama
-OLLAMA_URL=http://ollama:11434
-OLLAMA_LLM_MODEL=llama3.2
-OLLAMA_EMBED_MODEL=nomic-embed-text
+# Z.AI (GLM)
+ZAI_API_KEY=your-z-ai-api-key
+ZAI_BASE_URL=https://api.z.ai/api/paas/v4
+ZAI_LLM_MODEL=glm-4.7-flash
+ZAI_EMBED_MODEL=embedding-3
 
 # Whisper
 WHISPER_URL=http://whisper:9000
@@ -449,7 +452,7 @@ SESSION_TIMEOUT_MINUTES=30
 | 1 | LiveAvatar API key + sandbox | Pending | Register at liveavatar.com to get key and test LITE mode |
 | 2 | LLM model selection | Pending | Start with `llama3.2` (fast) or `mistral` (quality) |
 | 3 | Kokoro voice selection | Pending | Pick ES + EN voices per professor or globally |
-| 4 | GPU availability | Pending | Affects Whisper + Ollama speed significantly |
+| 4 | GPU availability | Pending | Affects Whisper + Kokoro speed significantly |
 | 5 | Admin auth | **In progress** | See [plan 02](docs/plans/02-auth-backend.md) |
 | 6 | Student auth | **In progress** | See [plan 03](docs/plans/03-auth-frontend.md) |
 | 7 | RAG source citations in frontend | **In progress** | See [plan 04](docs/plans/04-rag-visible.md) |
@@ -462,8 +465,8 @@ SESSION_TIMEOUT_MINUTES=30
 ### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
-- 16 GB RAM minimum (32 GB recommended when running Ollama + Whisper together)
-- GPU optional but strongly recommended for Ollama and Whisper speed
+- 8 GB RAM minimum (16 GB recommended when running Whisper + Kokoro locally)
+- A [Z.AI](https://z.ai) API key (free `glm-4.7-flash` / `glm-4.5-flash` models are listed on [pricing](https://docs.z.ai/guides/overview/pricing))
 - A LiveAvatar account and API key (register at liveavatar.com — sandbox mode is free)
 
 ---
@@ -479,21 +482,15 @@ cp .env.example .env
 ```
 
 Open `.env` and set at minimum:
+- `ZAI_API_KEY` — your key from [z.ai](https://z.ai)
 - `LIVEAVATAR_API_KEY` — your key from liveavatar.com
 - `POSTGRES_PASSWORD` — any secure password
 - `ADMIN_API_KEY` — any secret you'll use to call `/admin` endpoints
+- `JWT_SECRET_KEY` — generate with `openssl rand -hex 32`
 
 ---
 
-### Step 2 — Pull Ollama models
-
-```bash
-# Pull the LLM and embedding models (one-time, ~2-4 GB)
-docker compose run --rm ollama ollama pull llama3.2
-docker compose run --rm ollama ollama pull nomic-embed-text
-```
-
-### Step 3 — Download Kokoro TTS model files (first time only)
+### Step 2 — Download Kokoro TTS model files (first time only)
 
 ```bash
 # Build the kokoro image first
@@ -505,7 +502,7 @@ docker compose run --rm kokoro python download_models.py
 
 ---
 
-### Step 4 — Start all services
+### Step 3 — Start all services
 
 # Development (auto-uses override.yml with hot-reload + debug ports)
 ```bash
@@ -530,19 +527,18 @@ The database tables are created automatically on first backend startup (SQLAlche
 
 ---
 
-### Step 5 — Verify everything is running
+### Step 4 — Verify everything is running
 
 | Service | URL | Expected response |
 |---|---|---|
-| Backend API | http://localhost/api/health | `{"status":"ok"}` |
+| Backend API | http://localhost/api/health | JSON with `"status": "healthy"` or `"degraded"` and a `zai` probe |
 | API Docs (Swagger) | http://localhost/api/docs | Interactive API UI |
 | Qdrant dashboard | http://localhost:6333/dashboard | Qdrant web UI |
-| Ollama | http://localhost:11434 | `Ollama is running` |
 | Kokoro TTS | http://localhost:8880/health | `{"status":"ok","model_loaded":true}` |
 
 ---
 
-### Step 6 — Find your LiveAvatar avatar ID
+### Step 5 — Find your LiveAvatar avatar ID
 
 Each professor needs a `avatar_id` — the UUID of a public avatar from LiveAvatar.
 
@@ -566,7 +562,7 @@ This UUID is the avatar shown in the official LiveAvatar quickstart and is confi
 
 ---
 
-### Step 7 — Create your first professor (admin)
+### Step 6 — Create your first professor (admin)
 
 ```bash
 curl -X POST http://localhost/api/admin/professors \
@@ -583,7 +579,7 @@ curl -X POST http://localhost/api/admin/professors \
 
 ---
 
-### Step 8 — Upload knowledge documents
+### Step 7 — Upload knowledge documents
 
 ```bash
 curl -X POST http://localhost/api/admin/professors/{professor_id}/documents \
@@ -602,7 +598,7 @@ Wait for `"status": "ready"` before starting a student session.
 
 ---
 
-### Step 9 — Start a student session
+### Step 8 — Start a student session
 
 ```bash
 # Register a student
@@ -637,21 +633,63 @@ docker compose down -v
 
 ### GPU support (optional)
 
-To enable GPU acceleration for Ollama and Whisper, uncomment the `deploy` block in `docker-compose.yml`:
+To enable GPU acceleration for Whisper, add an NVIDIA `deploy` reservation to the `whisper` service in `docker-compose.yml`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host. The LLM no longer runs locally.
 
-```yaml
-ollama:
-  # ...
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: all
-            capabilities: [gpu]
+---
+
+## Cloud deployment (Vercel + Render)
+
+Services are split so the LLM no longer eats RAM on the API box.
+
+| Piece | Where | Config |
+|---|---|---|
+| Frontend | [Vercel](https://vercel.com) | Root Directory `services/frontend`. Env: `NEXT_PUBLIC_API_URL=https://<api>.onrender.com` |
+| API | [Render](https://render.com) Blueprint `render.yaml` | `virtual-professor-api` — health `/health` |
+| Postgres | Render | `virtual-professor-db` (private) |
+| Redis | Render Key Value | `virtual-professor-redis` (private) |
+| Qdrant | Render private service | `virtual-professor-qdrant` |
+| Whisper STT | Render private service | `virtual-professor-whisper` (needs ~2 GB RAM) |
+| Kokoro TTS | Render private service | `virtual-professor-kokoro` (downloads models on first boot) |
+
+Do **not** proxy `/speak` or document uploads through Vercel — body limits are too small. The browser must call Render directly (`NEXT_PUBLIC_API_URL` = the API origin, no `/api` suffix).
+
+### 1. Render (API + data + STT/TTS)
+
+1. Push this branch to GitHub.
+2. In Render: **New → Blueprint** → select the repo. Render reads [`render.yaml`](./render.yaml).
+3. When prompted, set:
+   - `ZAI_API_KEY` — from [z.ai](https://z.ai)
+   - `CORS_ORIGINS` — `*` for the first boot, then your Vercel origin (`https://your-app.vercel.app`)
+4. Wait until `virtual-professor-api` is Live. Copy its `https://….onrender.com` URL.
+5. First Kokoro boot downloads ONNX voices onto the disk (several minutes).
+
+### 2. Vercel (frontend)
+
+1. **Add New Project** → this repo.
+2. **Root Directory:** `services/frontend` (leave Framework as Next.js).
+3. Environment variable:
+   - `NEXT_PUBLIC_API_URL` = `https://virtual-professor-api.onrender.com` (no trailing slash, no `/api`)
+4. Deploy. Copy the `https://….vercel.app` URL.
+
+### 3. Lock CORS
+
+Back on Render → `virtual-professor-api` → Environment:
+
+```
+CORS_ORIGINS=https://your-app.vercel.app
 ```
 
-Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) to be installed on the host.
+Redeploy the API (or wait for a Blueprint sync). Trailing slashes are stripped automatically.
+
+### 4. Re-index knowledge
+
+Embedding size is **1024** (`embedding-3`). Collections built with Ollama `nomic-embed-text` (768) will not search. Re-upload documents from the admin UI.
+
+Default model is free `glm-4.7-flash`. Paid GLM-5: set `ZAI_LLM_MODEL=glm-5` on the API service.
+
+### Local Docker still works
+
+`docker compose up` keeps nginx + `NEXT_PUBLIC_API_URL=/api` + `ROOT_PATH=/api`. That path is only for the all-in-one compose stack, not for Vercel.
 
 ---
 
@@ -661,8 +699,8 @@ Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-nat
 |---|---|
 | Avatar & WebRTC | LiveAvatar LITE |
 | Speech-to-Text | Whisper (local) |
-| LLM | Ollama (llama3.2 / mistral) |
-| Embeddings | Ollama nomic-embed-text |
+| LLM | Z.AI GLM (`glm-4.7-flash` free / `glm-5` paid) |
+| Embeddings | Z.AI `embedding-3` |
 | RAG Framework | LlamaIndex |
 | Vector Database | Qdrant |
 | Reranker | BGE cross-encoder (local) |

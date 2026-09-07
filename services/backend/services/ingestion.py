@@ -3,7 +3,6 @@ import httpx
 from llama_index.core import StorageContext, VectorStoreIndex
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.readers.base import BaseReader
-from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.readers.file import (
     DocxReader,
     PDFReader,
@@ -15,10 +14,10 @@ from qdrant_client.models import Distance, VectorParams
 
 from core.config import settings
 from core.database import AsyncSessionLocal
+from services.embeddings import get_embed_model
 
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50
-EMBED_DIM = 768  # nomic-embed-text output dimension
 
 _FORMAT_READERS: dict[str, type[BaseReader]] = {
     "pdf": PDFReader,
@@ -72,7 +71,7 @@ async def _ensure_collection(client: QdrantClient, collection_name: str) -> None
     if collection_name not in existing:
         client.create_collection(
             collection_name=collection_name,
-            vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
+            vectors_config=VectorParams(size=settings.embed_dim, distance=Distance.COSINE),
         )
 
 
@@ -118,10 +117,7 @@ async def ingest_document(
             qdrant = QdrantClient(url=settings.qdrant_url)
             await _ensure_collection(qdrant, professor_collection)
 
-            embed_model = OllamaEmbedding(
-                model_name=settings.ollama_embed_model,
-                base_url=settings.ollama_url,
-            )
+            embed_model = get_embed_model()
 
             # Load and parse document
             if file_format in _MEDIA_FORMATS:

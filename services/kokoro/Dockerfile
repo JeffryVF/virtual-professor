@@ -18,4 +18,4 @@ VOLUME ["/app/models"]
 
 EXPOSE 8880
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8880"]
+CMD ["sh", "-c", "python download_models.py && uvicorn server:app --host 0.0.0.0 --port ${PORT:-8880}"]

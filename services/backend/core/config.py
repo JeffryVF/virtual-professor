@@ -14,16 +14,27 @@ class Settings(BaseSettings):
     # Database
     database_url: str
 
+    # FastAPI root path. Use "/api" behind nginx; leave empty on Render.
+    root_path: str = ""
+
+    # Uploaded documents (mount a Render disk here in production)
+    upload_dir: str = "/app/uploads"
+
     # Redis
     redis_url: str
 
     # Qdrant
     qdrant_url: str
 
-    # Ollama
-    ollama_url: str
-    ollama_llm_model: str = "llama3.2"
-    ollama_embed_model: str = "nomic-embed-text"
+    # Z.AI (GLM) — OpenAI-compatible API, no local LLM process
+    # Docs: https://docs.z.ai/guides/llm/glm-5
+    # Free models: glm-4.7-flash, glm-4.5-flash
+    # Paid: glm-5 ($1/$3.2 per 1M tokens)
+    zai_api_key: str = ""
+    zai_base_url: str = "https://api.z.ai/api/paas/v4"
+    zai_llm_model: str = "glm-4.7-flash"
+    zai_embed_model: str = "embedding-3"
+    embed_dim: int = 1024  # embedding-3 default; must match Qdrant collection size
     llm_max_tokens: int = 350  # max tokens per LLM response (env: LLM_MAX_TOKENS)
 
     # Whisper
@@ -78,6 +89,24 @@ class Settings(BaseSettings):
     # CORS — JSON array, comma-separated, or "*" for development
     cors_origins: list[str] = ["*"]
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalize_database_url(cls, value: str) -> str:
+        """Render (and Heroku) often emit postgres://; SQLAlchemy wants postgresql://."""
+        if isinstance(value, str) and value.startswith("postgres://"):
+            return "postgresql://" + value[len("postgres://") :]
+        return value
+
+    @field_validator("root_path", mode="before")
+    @classmethod
+    def _normalize_root_path(cls, value: str | None) -> str:
+        if not value:
+            return ""
+        stripped = str(value).strip().rstrip("/")
+        if stripped in ("", "/"):
+            return ""
+        return stripped if stripped.startswith("/") else f"/{stripped}"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors_origins(cls, value: str | list[str]) -> list[str]:
@@ -89,7 +118,8 @@ class Settings(BaseSettings):
           CORS_ORIGINS=["https://a.com"]      → ["https://a.com"]
         """
         if isinstance(value, list):
-            return value
+            cleaned = [str(item).strip().rstrip("/") for item in value if str(item).strip()]
+            return cleaned or ["*"]
         if isinstance(value, str):
             stripped = value.strip()
             # JSON array format
@@ -97,11 +127,12 @@ class Settings(BaseSettings):
                 try:
                     parsed = json.loads(stripped)
                     if isinstance(parsed, list):
-                        return parsed
+                        cleaned = [str(item).strip().rstrip("/") for item in parsed if str(item).strip()]
+                        return cleaned or ["*"]
                 except json.JSONDecodeError:
                     pass
             # Comma-separated or single value
-            parts = [p.strip() for p in stripped.split(",")]
+            parts = [p.strip().rstrip("/") for p in stripped.split(",") if p.strip()]
             return parts if parts else ["*"]
         return ["*"]
 
@@ -110,6 +141,17 @@ class Settings(BaseSettings):
     def validate_production(self) -> list[str]:
         """Check production-critical settings and return a list of warnings/errors."""
         warnings: list[str] = []
+
+        # ── Z.AI API key ────────────────────────────────────────────────────
+        if not self.zai_api_key or self.zai_api_key in (
+            "changeme",
+            "your-api-key",
+            "your-z-ai-api-key",
+        ):
+            raise RuntimeError(
+                "ZAI_API_KEY is empty or set to a placeholder. "
+                "Create a key at https://z.ai and set ZAI_API_KEY."
+            )
 
         # ── JWT secret key ──────────────────────────────────────────────────
         if not self.jwt_secret_key or self.jwt_secret_key in ("changeme", ""):

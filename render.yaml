@@ -1,0 +1,132 @@
+# Virtual Professor — Render Blueprint
+# Frontend stays on Vercel. This file mounts the API and its private deps.
+#
+# After the first sync:
+#   1. Set ZAI_API_KEY and CORS_ORIGINS (your Vercel origin) in the dashboard
+#   2. On Vercel set NEXT_PUBLIC_API_URL to this API's https://*.onrender.com URL
+#   3. Re-upload professor documents (embedding size is 1024, not Ollama's 768)
+
+databases:
+  - name: virtual-professor-db
+    databaseName: virtual_profesor
+    user: profesor
+    ipAllowList: [] # API-only, private network
+
+services:
+  - type: keyvalue
+    name: virtual-professor-redis
+    ipAllowList: []
+    plan: 256mb
+    maxmemoryPolicy: allkeys-lru
+
+  - type: web
+    name: virtual-professor-api
+    runtime: docker
+    plan: 1c-2g
+    dockerfilePath: ./services/backend/Dockerfile
+    dockerContext: ./services/backend
+    healthCheckPath: /health
+    disk:
+      name: uploads
+      mountPath: /app/uploads
+      sizeGB: 10
+    envVars:
+      - key: DEBUG
+        value: "false"
+      - key: ROOT_PATH
+        value: ""
+      - key: UPLOAD_DIR
+        value: /app/uploads
+      - key: DATABASE_URL
+        fromDatabase:
+          name: virtual-professor-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: virtual-professor-redis
+          property: connectionString
+      - key: QDRANT_URL
+        value: http://virtual-professor-qdrant:6333
+      - key: WHISPER_URL
+        value: http://virtual-professor-whisper:9000
+      - key: KOKORO_URL
+        value: http://virtual-professor-kokoro:8880
+      - key: ZAI_API_KEY
+        sync: false
+      - key: ZAI_BASE_URL
+        value: https://api.z.ai/api/paas/v4
+      - key: ZAI_LLM_MODEL
+        value: glm-4.7-flash
+      - key: ZAI_EMBED_MODEL
+        value: embedding-3
+      - key: EMBED_DIM
+        value: "1024"
+      - key: LLM_MAX_TOKENS
+        value: "350"
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false
+      - key: RAG_MIN_RELEVANCE_SCORE
+        value: "0.75"
+      - key: RERANKER_TYPE
+        value: none
+      - key: RAG_RETRIEVAL_TOP_K
+        value: "40"
+      - key: RERANKER_TOP_N
+        value: "6"
+      - key: SESSION_MEMORY_MESSAGES
+        value: "10"
+      - key: SESSION_TIMEOUT_MINUTES
+        value: "30"
+      - key: LANGFUSE_ENABLE
+        value: "false"
+
+  - type: pserv
+    name: virtual-professor-qdrant
+    runtime: image
+    plan: 1c-2g
+    image:
+      url: docker.io/qdrant/qdrant:latest
+    disk:
+      name: qdrant-storage
+      mountPath: /qdrant/storage
+      sizeGB: 10
+    envVars:
+      - key: PORT
+        value: "6333"
+
+  - type: pserv
+    name: virtual-professor-whisper
+    runtime: image
+    plan: 1c-2g
+    image:
+      url: docker.io/onerahmet/openai-whisper-asr-webservice:latest
+    envVars:
+      - key: PORT
+        value: "9000"
+      - key: ASR_MODEL
+        value: base
+      - key: ASR_ENGINE
+        value: openai_whisper
+
+  - type: pserv
+    name: virtual-professor-kokoro
+    runtime: docker
+    plan: 1c-2g
+    dockerfilePath: ./services/kokoro/Dockerfile
+    dockerContext: ./services/kokoro
+    disk:
+      name: kokoro-models
+      mountPath: /app/models
+      sizeGB: 5
+    envVars:
+      - key: PORT
+        value: "8880"
+      - key: MODELS_DIR
+        value: /app/models

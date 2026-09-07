@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
 import { RefreshCw, Activity, AlertCircle, CheckCircle, XCircle } from 'lucide-react'
 import { handleApiError } from '@/lib/error-handler'
+import { API_BASE } from '@/lib/api-base'
 
 interface ServiceProbe {
   status: 'healthy' | 'degraded' | 'unhealthy'
@@ -27,8 +28,9 @@ const serviceNameLabels: Record<string, string> = {
   postgres: 'PostgreSQL',
   redis: 'Redis',
   qdrant: 'Qdrant',
-  ollama: 'Ollama (LLM)',
+  zai: 'Z.AI (GLM)',
   kokoro: 'Kokoro (TTS)',
+  whisper: 'Whisper (STT)',
 }
 
 function StatusDot({ status }: { status: ServiceProbe['status'] }) {
@@ -78,7 +80,7 @@ export default function AdminStatusPage() {
     }
 
     try {
-      const res = await fetch('/api/health')
+      const res = await fetch(`${API_BASE}/health`)
       if (!res.ok) {
         const err = await handleApiError(res, { silent: true })
         setState({ kind: 'error', message: err.detail ?? err.message })
