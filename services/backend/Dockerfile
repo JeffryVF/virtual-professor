@@ -3,8 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Render Free = 512MB. Keep the process single-threaded and stop glibc from
-# grabbing extra arenas, or FastEmbed + FastAPI get OOM-killed on ingest.
-ENV FASTEMBED_CACHE_PATH=/app/.cache/fastembed
+# grabbing extra arenas. Embeddings are Gemini API calls (no local model).
 ENV HF_HUB_DISABLE_TELEMETRY=1
 ENV TOKENIZERS_PARALLELISM=false
 ENV OMP_NUM_THREADS=1
@@ -27,10 +26,6 @@ COPY requirements.txt .
 RUN grep -vE '^(torch|sentence-transformers|llama-index-postprocessor-sbert-rerank)' requirements.txt \
       > /tmp/requirements.prod.txt \
     && pip install --no-cache-dir -r /tmp/requirements.prod.txt
-
-# Bake the embedding model into the image so Render does not download it on first ingest
-RUN mkdir -p /app/.cache/fastembed \
-    && python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', cache_dir='/app/.cache/fastembed', threads=1)"
 
 COPY . .
 

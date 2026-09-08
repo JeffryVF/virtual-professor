@@ -56,6 +56,30 @@ async def _probe_zai() -> dict:
     return {"status": "healthy"}
 
 
+async def _probe_qdrant() -> dict:
+    """Check Qdrant Cloud connectivity via list-collections."""
+    from core.qdrant import get_async_qdrant_client
+
+    client = get_async_qdrant_client()
+    try:
+        await client.get_collections()
+        return {"status": "healthy"}
+    finally:
+        await client.close()
+
+
+async def _probe_gemini() -> dict:
+    """Check Gemini API connectivity via GET /v1beta/models."""
+    key = (settings.google_api_key or settings.gemini_api_key).strip()
+    async with httpx.AsyncClient(timeout=_SERVICE_TIMEOUT) as client:
+        response = await client.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            params={"key": key, "pageSize": 1},
+        )
+        response.raise_for_status()
+    return {"status": "healthy"}
+
+
 # ── Probe runner with timeout ────────────────────────────────────────────────
 
 
@@ -91,6 +115,8 @@ async def health():
         _run_probe("postgres", _probe_postgres()),
         _run_probe("redis", _probe_redis()),
         _run_probe("zai", _probe_zai()),
+        _run_probe("qdrant", _probe_qdrant()),
+        _run_probe("gemini", _probe_gemini()),
     )
     services = dict(raw)
     all_healthy = all(s["status"] == "healthy" for s in services.values())

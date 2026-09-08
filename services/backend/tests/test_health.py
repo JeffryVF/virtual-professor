@@ -21,7 +21,7 @@ async def test_health_endpoint(async_client):
     assert body["version"] == "0.1.0"
 
     services = body["services"]
-    assert set(services.keys()) == {"postgres", "redis", "zai"}
+    assert set(services.keys()) == {"postgres", "redis", "zai", "qdrant", "gemini"}
 
     for service_name, info in services.items():
         assert info["status"] in ("healthy", "unhealthy")
@@ -74,13 +74,15 @@ async def test_health_all_healthy(async_client):
         patch("routers.health._probe_postgres", new_callable=AsyncMock, return_value={"status": "healthy"}),
         patch("routers.health._probe_redis", new_callable=AsyncMock, return_value={"status": "healthy"}),
         patch("routers.health._probe_zai", new_callable=AsyncMock, return_value={"status": "healthy"}),
+        patch("routers.health._probe_qdrant", new_callable=AsyncMock, return_value={"status": "healthy"}),
+        patch("routers.health._probe_gemini", new_callable=AsyncMock, return_value={"status": "healthy"}),
     ):
         response = await async_client.get("/health")
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "healthy"
-    for svc in ("postgres", "redis", "zai"):
+    for svc in ("postgres", "redis", "zai", "qdrant", "gemini"):
         assert body["services"][svc]["status"] == "healthy"
         assert "latency_ms" in body["services"][svc]
 
@@ -98,6 +100,8 @@ async def test_health_one_down(async_client):
         # Redis probe raises → _run_probe catches and returns "unhealthy"
         patch("routers.health._probe_redis", new_callable=AsyncMock, side_effect=Exception("Redis connection refused")),
         patch("routers.health._probe_zai", new_callable=AsyncMock, return_value={"status": "healthy"}),
+        patch("routers.health._probe_qdrant", new_callable=AsyncMock, return_value={"status": "healthy"}),
+        patch("routers.health._probe_gemini", new_callable=AsyncMock, return_value={"status": "healthy"}),
     ):
         response = await async_client.get("/health")
 

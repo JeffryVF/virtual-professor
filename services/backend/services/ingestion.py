@@ -3,19 +3,29 @@ import logging
 import os
 
 import fitz
+from llama_index.core import StorageContext, VectorStoreIndex
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.readers.base import BaseReader
+from llama_index.core.schema import NodeRelationship, RelatedNodeInfo
 from llama_index.readers.file import (
     DocxReader,
     PDFReader,
     PptxReader,
 )
-from sqlalchemy import delete, or_, select
+from llama_index.vector_stores.qdrant import QdrantVectorStore
+from sqlalchemy import or_, select
 
 from core.config import settings
 from core.database import AsyncSessionLocal
-from models.db import Document, DocumentChunk, DocumentStatus, Professor
+from core.qdrant import get_qdrant_client
+from models.db import Document, DocumentStatus, Professor
 from services.embeddings import get_embed_model
+from services.qdrant_store import (
+    VP_DOCUMENT_ID_KEY,
+    delete_collection,
+    delete_document_points,
+    ensure_collection,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,13 +91,45 @@ def document_source_path(
     )
 
 
+def stamp_chunk_document_id(node, document_id: str) -> None:
+    """Bind a chunk to the Postgres document UUID in LlamaIndex + Qdrant payload.
+
+    LlamaIndex copies ``node.ref_doc_id`` onto payload ``document_id`` / ``doc_id``,
+    overwriting any metadata value. Set the SOURCE relationship so deletes and
+    the admin chunk list match the uploaded document, not the PDF reader id.
+    """
+    doc_id = str(document_id)
+    node.metadata["document_id"] = doc_id
+    node.metadata[VP_DOCUMENT_ID_KEY] = doc_id
+    node.relationships[NodeRelationship.SOURCE] = RelatedNodeInfo(node_id=doc_id)
+
+
+def _index_nodes(nodes, professor_collection: str) -> bool:
+    """Embed and upsert nodes into the professor's Qdrant collection.
+
+    Returns True when the collection was recreated because EMBED_DIM changed.
+    """
+    qdrant = get_qdrant_client()
+    try:
+        wiped = ensure_collection(qdrant, professor_collection)
+        embed_model = get_embed_model()
+        vector_store = QdrantVectorStore(client=qdrant, collection_name=professor_collection)
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        VectorStoreIndex(nodes, storage_context=storage_context, embed_model=embed_model)
+        return wiped
+    finally:
+        qdrant.close()
+
+
 async def ingest_document(
     document_id: str,
     professor_collection: str,
     file_path: str,
     file_format: str,
 ) -> None:
-    """Background task: parse, chunk, embed and store a document in pgvector."""
+    """Background task: parse, chunk, embed and store a document in Qdrant."""
+    wiped = False
+    professor_id = None
     async with AsyncSessionLocal() as db:
         try:
             result = await db.execute(select(Document).where(Document.id == document_id))
@@ -104,7 +146,6 @@ async def ingest_document(
                 file_format,
             )
 
-            # Pre-ingestion validation
             is_valid, error_msg = _validate_document(
                 file_path,
                 file_format,
@@ -117,9 +158,6 @@ async def ingest_document(
                 log.warning("Document validation failed: document_id=%s error=%s", document_id, error_msg)
                 return
 
-            embed_model = await asyncio.to_thread(get_embed_model)
-
-            # Load and parse document
             if file_format == "url":
                 from pathlib import Path
                 from llama_index.readers.web import SimpleWebPageReader
@@ -129,15 +167,12 @@ async def ingest_document(
                 reader = _FORMAT_READERS[file_format]()
                 documents = reader.load_data(file=file_path)
             else:
-                # Fallback: read as plain text
                 from llama_index.core import SimpleDirectoryReader
                 documents = SimpleDirectoryReader(input_files=[file_path]).load_data()
 
-            # Chunk
             splitter = SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
             nodes = splitter.get_nodes_from_documents(documents)
 
-            # Post-parse validation: ensure at least one non-empty node
             if not nodes or all(not node.get_content().strip() for node in nodes):
                 doc.status = DocumentStatus.error
                 doc.error_message = "EMPTY_CHUNKS: Document produced no usable text content after chunking"
@@ -145,34 +180,18 @@ async def ingest_document(
                 log.warning("Document produced no chunks: document_id=%s", document_id)
                 return
 
-            # Embed all chunks in a single batch
-            contents = [node.get_content() for node in nodes]
-            embeddings = await asyncio.to_thread(
-                embed_model.get_text_embedding_batch, contents
-            )
+            for idx, node in enumerate(nodes):
+                stamp_chunk_document_id(node, document_id)
+                node.metadata["professor_collection"] = professor_collection
+                node.metadata["source_filename"] = doc.filename
+                node.metadata["chunk_index"] = idx
+                if "page_label" not in node.metadata:
+                    node.metadata["page_label"] = node.metadata.get("page_number")
 
-            # Replace any previous chunks for this document, then insert fresh rows
-            await db.execute(
-                delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
-            )
-            for idx, (node, embedding) in enumerate(zip(nodes, embeddings)):
-                db.add(
-                    DocumentChunk(
-                        document_id=document_id,
-                        professor_collection=professor_collection,
-                        chunk_index=idx,
-                        text=node.get_content(),
-                        embedding=embedding,
-                        page_label=node.metadata.get("page_label"),
-                        chunk_metadata={
-                            "document_id": document_id,
-                            "professor_collection": professor_collection,
-                            "source_filename": doc.filename,
-                        },
-                    )
-                )
+            await asyncio.to_thread(delete_document_points, professor_collection, document_id)
+            wiped = await asyncio.to_thread(_index_nodes, nodes, professor_collection)
+            professor_id = doc.professor_id
 
-            # Mark document as ready
             doc.status = DocumentStatus.ready
             doc.chunk_count = len(nodes)
             await db.commit()
@@ -192,15 +211,58 @@ async def ingest_document(
                 await db.commit()
             raise
 
+    if wiped and professor_id is not None:
+        await _reembed_professor_after_dim_change(
+            professor_id, document_id, professor_collection
+        )
+
+
+async def _reembed_professor_after_dim_change(
+    professor_id,
+    skip_document_id: str,
+    professor_collection: str,
+) -> None:
+    """Re-ingest sibling documents after a Qdrant collection is resized."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Document).where(
+                Document.professor_id == professor_id,
+                Document.id != skip_document_id,
+                Document.status != DocumentStatus.error,
+            )
+        )
+        others = list(result.scalars().all())
+
+    if not others:
+        return
+
+    log.warning(
+        "Re-embedding %s sibling document(s) after EMBED_DIM change in %s",
+        len(others),
+        professor_collection,
+    )
+    for other in others:
+        save_path = document_source_path(other.professor_id, other.id, other.format)
+        if not os.path.isfile(save_path):
+            log.warning(
+                "Skipping re-embed of %s: source file is missing",
+                other.id,
+            )
+            continue
+        try:
+            await ingest_document(
+                str(other.id), professor_collection, save_path, other.format
+            )
+        except Exception:
+            log.exception("Failed to re-embed sibling document %s", other.id)
+
 
 async def resume_incomplete_ingestion() -> None:
-    """Embed documents that never landed in pgvector, if the source file still exists.
+    """Embed documents that never finished indexing, if the source file still exists.
 
-    Covers leftover Qdrant-era rows (``ready`` with no ``document_chunks``),
-    crashed uploads (``pending``/``processing``), and a VECTOR(1024)→384 resize
-    that truncated old embeddings.
+    Covers crashed uploads (``pending``/``processing``) and ready rows that
+    recorded zero chunks (interrupted before Qdrant upsert).
     """
-    chunked = select(DocumentChunk.document_id).distinct()
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Document, Professor)
@@ -210,7 +272,7 @@ async def resume_incomplete_ingestion() -> None:
                     Document.status.in_(
                         (DocumentStatus.pending, DocumentStatus.processing)
                     ),
-                    Document.id.not_in(chunked),
+                    Document.chunk_count == 0,
                 )
             )
             .where(Document.status != DocumentStatus.error)
@@ -220,7 +282,7 @@ async def resume_incomplete_ingestion() -> None:
     if not jobs:
         return
 
-    log.warning("Vectorizing %s document(s) missing pgvector embeddings", len(jobs))
+    log.warning("Vectorizing %s document(s) missing Qdrant embeddings", len(jobs))
     for doc, prof in jobs:
         save_path = document_source_path(doc.professor_id, doc.id, doc.format)
         if not os.path.isfile(save_path):
@@ -241,30 +303,10 @@ async def resume_incomplete_ingestion() -> None:
 
 
 async def delete_qdrant_collection(collection_name: str) -> None:
-    """Delete every stored chunk for a professor collection (used when removing a professor).
-
-    Kept under a legacy name for call-site compatibility; there is no Qdrant anymore.
-    """
-    async with AsyncSessionLocal() as db:
-        prof_result = await db.execute(
-            select(Professor).where(Professor.collection == collection_name)
-        )
-        prof = prof_result.scalar_one_or_none()
-        if prof is not None:
-            doc_result = await db.execute(
-                select(Document.id).where(Document.professor_id == prof.id)
-            )
-            for (doc_id,) in doc_result.all():
-                await db.execute(
-                    delete(DocumentChunk).where(DocumentChunk.document_id == doc_id)
-                )
-        await db.commit()
+    """Delete the professor's Qdrant collection (used when removing a professor)."""
+    await asyncio.to_thread(delete_collection, collection_name)
 
 
 async def delete_document_chunks(professor_collection: str, document_id: str) -> None:
-    """Remove all stored chunks that belong to a specific document."""
-    async with AsyncSessionLocal() as db:
-        await db.execute(
-            delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
-        )
-        await db.commit()
+    """Remove all Qdrant points that belong to a specific document."""
+    await asyncio.to_thread(delete_document_points, professor_collection, document_id)

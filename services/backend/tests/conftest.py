@@ -15,9 +15,14 @@ from fastapi import FastAPI
 # ── Override settings BEFORE importing app modules ──────────────────────────
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
+os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
+os.environ.setdefault("QDRANT_API_KEY", "")
 os.environ.setdefault("ZAI_API_KEY", "test-zai-key")
 os.environ.setdefault("ZAI_LLM_MODEL", "glm-4.7-flash")
-os.environ.setdefault("ZAI_EMBED_MODEL", "embedding-3")
+os.environ.setdefault("GOOGLE_API_KEY", "test-google-key")
+os.environ.setdefault("EMBED_PROVIDER", "gemini")
+os.environ.setdefault("EMBED_MODEL", "gemini-embedding-001")
+os.environ.setdefault("EMBED_DIM", "768")
 os.environ.setdefault("DEBUG", "true")
 os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 os.environ.setdefault("SESSION_MEMORY_MESSAGES", "10")
@@ -25,6 +30,9 @@ os.environ.setdefault("SESSION_TIMEOUT_MINUTES", "30")
 os.environ.setdefault("RAG_MIN_RELEVANCE_SCORE", "0.0")
 os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-key-for-testing-only")
 os.environ.setdefault("LANGFUSE_ENABLE", "false")
+os.environ["CORS_ORIGINS"] = (
+    '["https://virtual-professor-frontend.onrender.com","http://localhost:3000"]'
+)
 # ─────────────────────────────────────────────────────────────────────────────
 
 from main import app  # noqa: E402

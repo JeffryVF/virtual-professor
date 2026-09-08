@@ -70,14 +70,46 @@ def test_render_blueprint_declares_split_services():
     assert "healthCheckPath: /health" in text
     assert "glm-4.7-flash" in text
     assert "EMBED_PROVIDER" in text
-    assert "fastembed" in text
+    assert "gemini-embedding-001" in text
+    assert "GOOGLE_API_KEY" in text
     assert "plan: free" in text
-    assert "FASTEMBED_CACHE_PATH" in text
     assert "EMBED_RESUME_ON_STARTUP" in text
     assert "MALLOC_ARENA_MAX" in text
     assert "DATABASE_URL" in text
+    assert "QDRANT_URL" in text
+    assert "QDRANT_API_KEY" in text
     assert "NEXT_PUBLIC_API_URL" in text
     assert "dockerfilePath: ./services/frontend/Dockerfile.prod" in text
+
+
+def test_requirements_use_qdrant_not_pgvector():
+    path = _find_repo_file("requirements.txt")
+    if path is None:
+        pytest.skip("requirements.txt not available from this test path")
+    text = path.read_text(encoding="utf-8")
+    assert "qdrant-client" in text
+    assert "llama-index-vector-stores-qdrant" in text
+    assert "google-genai" in text
+    assert "fastembed" not in text
+    assert "pgvector" not in text
+
+
+def test_compose_and_env_example_target_qdrant_cloud():
+    compose = _find_repo_file("docker-compose.yml")
+    example = _find_repo_file(".env.example")
+    if compose is None or example is None:
+        pytest.skip("compose/.env.example not available from this test path")
+    compose_text = compose.read_text(encoding="utf-8")
+    example_text = example.read_text(encoding="utf-8")
+    assert "pgvector/pgvector" not in compose_text
+    assert "image: postgres:16" in compose_text
+    assert "QDRANT_URL=${QDRANT_URL}" in compose_text
+    assert "QDRANT_API_KEY=${QDRANT_API_KEY}" in compose_text
+    assert "QDRANT_URL=" in example_text
+    assert "QDRANT_API_KEY=" in example_text
+    assert "GOOGLE_API_KEY=" in example_text
+    assert "gemini-embedding-001" in example_text
+    assert "cloud.qdrant.io" in example_text
 
 
 def test_api_dockerfile_omits_torch_for_render_ram():
@@ -93,6 +125,8 @@ def test_api_dockerfile_omits_torch_for_render_ram():
     assert "extra-index-url" not in text
     assert "grep -vE" in text
     assert "--workers 1" in text
+    assert "FASTEMBED_CACHE_PATH" not in text
+    assert "TextEmbedding" not in text
 
 
 def test_vercel_config_lives_in_frontend():
