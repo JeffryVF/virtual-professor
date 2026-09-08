@@ -113,6 +113,14 @@ async def test_health_one_down(async_client):
     assert "error" in body["services"]["redis"]
 
 
+def test_qdrant_cloud_probe_allows_longer_than_local_services():
+    """Qdrant Cloud TLS/REST must not share the 5s local-service budget."""
+    from routers.health import _QDRANT_PROBE_TIMEOUT, _SERVICE_TIMEOUT
+
+    assert _QDRANT_PROBE_TIMEOUT > _SERVICE_TIMEOUT
+    assert _QDRANT_PROBE_TIMEOUT >= 20
+
+
 @pytest.mark.asyncio
 async def test_health_no_auth_required(async_client):
     """GET /health SHALL return 200 without any Authorization header.

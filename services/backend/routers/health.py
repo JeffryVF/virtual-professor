@@ -17,6 +17,8 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
 
 _SERVICE_TIMEOUT = 5
+# Qdrant Cloud TLS + REST can exceed the local 5s budget on first contact.
+_QDRANT_PROBE_TIMEOUT = 20
 
 
 # ── Individual probe functions ───────────────────────────────────────────────
@@ -83,14 +85,14 @@ async def _probe_gemini() -> dict:
 # ── Probe runner with timeout ────────────────────────────────────────────────
 
 
-async def _run_probe(name: str, probe_coro) -> tuple[str, dict]:
+async def _run_probe(name: str, probe_coro, timeout: float = _SERVICE_TIMEOUT) -> tuple[str, dict]:
     """Run a single probe with timeout and latency measurement.
 
     Returns a (name, result_dict) tuple suitable for ``dict()``.
     """
     start = asyncio.get_event_loop().time()
     try:
-        result = await asyncio.wait_for(probe_coro, timeout=_SERVICE_TIMEOUT)
+        result = await asyncio.wait_for(probe_coro, timeout=timeout)
         elapsed = (asyncio.get_event_loop().time() - start) * 1000
         result["latency_ms"] = round(elapsed, 2)
         return name, result
@@ -107,15 +109,15 @@ async def _run_probe(name: str, probe_coro) -> tuple[str, dict]:
 async def health():
     """Combined health check for all backend services.
 
-    All probes run concurrently with ``asyncio.gather()`` and a 5-second
-    timeout each. Returns ``healthy`` only when every service responds,
-    ``degraded`` otherwise.
+    All probes run concurrently. Local services use a 5-second timeout;
+    the Qdrant Cloud probe allows 20 seconds for TLS and REST.
+    Returns ``healthy`` only when every service responds, ``degraded`` otherwise.
     """
     raw = await asyncio.gather(
         _run_probe("postgres", _probe_postgres()),
         _run_probe("redis", _probe_redis()),
         _run_probe("zai", _probe_zai()),
-        _run_probe("qdrant", _probe_qdrant()),
+        _run_probe("qdrant", _probe_qdrant(), timeout=_QDRANT_PROBE_TIMEOUT),
         _run_probe("gemini", _probe_gemini()),
     )
     services = dict(raw)
