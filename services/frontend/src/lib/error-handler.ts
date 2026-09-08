@@ -4,6 +4,7 @@ export interface ApiError {
   status: number
   message: string
   detail?: string
+  code?: string
 }
 
 const STATUS_MESSAGES: Record<number, string> = {
@@ -36,11 +37,29 @@ export async function parseApiError(error: unknown): Promise<ApiError> {
   if (error instanceof Response) {
     const text = await error.text().catch(() => '')
     const body = text ? await tryParseJson(text) : null
-    const detail = body && typeof body.detail === 'string' ? body.detail : undefined
+    const detailValue = body?.detail
+    const detail =
+      typeof detailValue === 'string'
+        ? detailValue
+        : detailValue && typeof detailValue === 'object' && 'error' in detailValue
+          ? typeof detailValue.error === 'object' &&
+            detailValue.error !== null &&
+            'message' in detailValue.error &&
+            typeof detailValue.error.message === 'string'
+            ? detailValue.error.message
+            : undefined
+          : undefined
+    const code =
+      detailValue && typeof detailValue === 'object' && 'error' in detailValue &&
+      typeof detailValue.error === 'object' && detailValue.error !== null &&
+      'code' in detailValue.error && typeof detailValue.error.code === 'string'
+        ? detailValue.error.code
+        : undefined
     return {
       status: error.status,
       message: getStatusMessage(error.status),
       detail,
+      code,
     }
   }
 
@@ -71,7 +90,13 @@ export async function handleApiError(
   const apiError = await parseApiError(error)
 
   // Don't show toasts for 401 — auth redirect handles it
-  if (!options?.silent && apiError.status !== 401 && typeof window !== 'undefined') {
+  if (
+    !options?.silent &&
+    apiError.status !== 401 &&
+    apiError.status !== 413 &&
+    apiError.code !== 'FILE_TOO_LARGE' &&
+    typeof window !== 'undefined'
+  ) {
     const displayMessage = apiError.detail ?? apiError.message
     toast.error(displayMessage)
   }

@@ -8,7 +8,9 @@ import { Button } from '@/components/ui/button'
 import { Badge, type BadgeProps } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { getDocuments, uploadDocument, deleteDocument, type Document } from '@/lib/api'
+import type { ApiError } from '@/lib/error-handler'
 
 const statusVariant: Record<string, BadgeProps['variant']> = {
   ready: 'success',
@@ -22,6 +24,7 @@ export default function DocumentsPage() {
   const [docs, setDocs] = useState<Document[]>([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
+  const [limitError, setLimitError] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => { load() }, [id])
@@ -43,7 +46,12 @@ export default function DocumentsPage() {
         toast.success(`"${file.name}" queued for processing`)
       }
     } catch (err) {
-      toast.error(String(err))
+      const apiError = err as Partial<ApiError>
+      if (apiError.status === 413 || apiError.code === 'FILE_TOO_LARGE') {
+        setLimitError(true)
+      } else {
+        toast.error(apiError.detail ?? apiError.message ?? String(err))
+      }
     } finally {
       setUploading(false)
       if (inputRef.current) inputRef.current.value = ''
@@ -158,6 +166,18 @@ export default function DocumentsPage() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={limitError} onOpenChange={setLimitError}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Archivo demasiado grande</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            El archivo supera el límite permitido de 50 MB. Reduce su tamaño o divide el documento en varios archivos e inténtalo de nuevo.
+          </p>
+          <Button onClick={() => setLimitError(false)} className="mt-2">Entendido</Button>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

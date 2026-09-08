@@ -76,7 +76,7 @@ class Settings(BaseSettings):
 
     # Upload validation
     upload_max_size_mb: int = 50
-    upload_max_pages: int = 200
+    upload_max_pages: int = 400
     upload_allowed_formats: str = "pdf,docx,pptx,txt,url"
 
     # Professor document limits
