@@ -1,14 +1,14 @@
 # Virtual Professor — Render Blueprint
 # Render hosts the frontend, API, and a small volatile Redis cache.
-# Supabase hosts the persistent PostgreSQL + pgvector database.
+# Supabase hosts persistent PostgreSQL (relational data).
+# Qdrant Cloud (free tier) hosts the vector collections.
 #
 # After the first sync:
-#   1. Set DATABASE_URL and ZAI_API_KEY in the Render dashboard
+#   1. Set DATABASE_URL, ZAI_API_KEY, GOOGLE_API_KEY, QDRANT_URL, and QDRANT_API_KEY
 #   2. The frontend calls the API directly (NEXT_PUBLIC_API_URL is a build
 #      arg pointing at this API's https://*.onrender.com URL)
-#   3. On boot the API resizes document_chunks to VECTOR(384) if needed.
-#      Documents are vectorized on upload (not on boot) so FastEmbed does
-#      not OOM Render Free's 512MB at startup.
+#   3. Documents are vectorized on upload via Gemini gemini-embedding-001
+#      (768-d, cosine) and upserted to Qdrant Cloud.
 
 services:
   - type: keyvalue
@@ -44,17 +44,21 @@ services:
         value: https://api.z.ai/api/paas/v4
       - key: ZAI_LLM_MODEL
         value: glm-4.7-flash
-      # ── Embeddings (local, no API) ──────────────────────────────────────
+      # ── Embeddings (Gemini API) ─────────────────────────────────────────
+      - key: GOOGLE_API_KEY
+        sync: false
       - key: EMBED_PROVIDER
-        value: fastembed
+        value: gemini
       - key: EMBED_MODEL
-        value: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+        value: gemini-embedding-001
       - key: EMBED_DIM
-        value: "384"
-      - key: FASTEMBED_CACHE_PATH
-        value: /app/.cache/fastembed
+        value: "768"
       - key: EMBED_RESUME_ON_STARTUP
         value: "false"
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
       - key: OMP_NUM_THREADS
         value: "1"
       - key: MKL_NUM_THREADS

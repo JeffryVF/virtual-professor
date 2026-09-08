@@ -66,8 +66,8 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 └─────────┼───────────┼──────────────────┼──────────┼────────────┘
           │           │                  │          │
     ┌─────┴────┐ ┌─────▼──┐  ┌───────────▼──┐ ┌────▼───────────┐
-    │Browser   │ │  Z.AI  │  │  PostgreSQL  │ │  Edge-TTS     │
-    │SpeechRec │ │  GLM   │  │  (pgvector)  │ │  (Microsoft)  │
+    │Browser   │ │  Z.AI  │  │ Qdrant Cloud │ │  Edge-TTS     │
+    │SpeechRec │ │  GLM   │  │  (free tier) │ │  (Microsoft)  │
     │ognition  │ │        │  │  Vector DB   │ │   TTS         │
     └──────────┘ └────────┘  └──────┬───────┘ └────────────────┘
                                    │
@@ -78,7 +78,8 @@ An AI-powered virtual professor system that lets students interact with avatar-b
                                               └─────────┘
                             ┌──────────────┐
                             │  PostgreSQL  │
-                            │  (profiles,  │
+                            │  (Supabase:  │
+                            │  profiles,   │
                             │   history)   │
                             └──────────────┘
 
@@ -96,9 +97,10 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 |---|---|---|---|
 | `backend` | custom FastAPI | 8000 | Orchestrator, REST API, RAG, Edge-TTS, session management |
 | `frontend` | custom Next.js | 3000 | Student portal + Admin portal (dev compose only; Render in prod) |
-| `postgres` | `pgvector/pgvector:pg16` | 5432 | Relational data + pgvector embeddings |
+| `postgres` | `postgres:16` | 5432 | Relational data (professors, documents, sessions) |
 | `redis` | `redis:7` | 6379 | Active session context cache |
 | `nginx` | `nginx` | 80/443 | Reverse proxy (dev compose only) |
+| Qdrant Cloud | managed free tier | 443/6333 | Per-professor vector collections |
 
 ### Service Responsibilities
 
@@ -117,17 +119,19 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 **Z.AI (GLM)**
 - Cloud LLM via the [Z.AI Open Platform](https://docs.z.ai/guides/llm/glm-5) (OpenAI-compatible chat completions)
 - Default model: `glm-4.7-flash` (free). Set `ZAI_LLM_MODEL=glm-5` to use GLM-5 (paid)
-- RAG embeddings run locally with FastEmbed and a multilingual MiniLM model; no embedding API key is required
+- RAG embeddings use Google Gemini `gemini-embedding-001` (768-d); set `GOOGLE_API_KEY`
 - Thinking mode is disabled for short spoken professor replies
 
-**FastEmbed (embeddings)**
-- Local `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384-dim) runs inside the backend
-- The model is downloaded once per deployed instance and is reused by ingestion and retrieval
+**Gemini (embeddings)**
+- Cloud `gemini-embedding-001` (768-dim, Matryoshka; 1536/3072 also supported via `EMBED_DIM`)
+- Queries use `RETRIEVAL_QUERY` and documents use `RETRIEVAL_DOCUMENT`
+- Requires `GOOGLE_API_KEY` from [Google AI Studio](https://aistudio.google.com/apikey)
 
-**pgvector (in PostgreSQL)**
-- One embedding row per document chunk, filtered by professor collection
-- Stores embeddings and metadata (source filename, page label)
-- Rows are deleted and re-inserted on re-index
+**Qdrant Cloud (free tier)**
+- One collection per professor (`professors.collection`)
+- Stores 768-dim Gemini vectors and chunk metadata (source filename, page label)
+- Points are deleted and re-upserted on re-index
+- Cluster URL + API key: [cloud.qdrant.io](https://cloud.qdrant.io)
 
 **Edge-TTS**
 - Converts LLM response text to `audio/mpeg` bytes via Microsoft's free neural voices
@@ -153,7 +157,7 @@ name           VARCHAR     professor display name
 topic          VARCHAR     scope boundary (e.g., "Calculus", "World History")
 language       ENUM        es | en | both
 avatar_id      VARCHAR     LiveAvatar free avatar UUID
-collection     VARCHAR     per-professor pgvector filter key (uniq)
+collection     VARCHAR     per-professor Qdrant collection name (uniq)
 system_prompt  TEXT        personality and tone instructions for the LLM
 created_at     TIMESTAMP
 ```
@@ -165,7 +169,7 @@ professor_id   UUID        FOREIGN KEY → professors.id
 filename       VARCHAR     original filename
 format         VARCHAR     pdf | docx | pptx | txt | url
 status         ENUM        pending | processing | ready | error
-chunk_count    INTEGER     number of chunks stored in pgvector
+chunk_count    INTEGER     number of chunks stored in Qdrant
 error_message  TEXT        populated if status = error
 uploaded_at    TIMESTAMP
 ```
@@ -199,18 +203,8 @@ sources_json   TEXT        JSON of RAG source citations
 timestamp      TIMESTAMP
 ```
 
-### document_chunks
-```
-id                  UUID        PRIMARY KEY
-document_id         UUID        FOREIGN KEY → documents.id
-professor_collection VARCHAR    filter key matching professors.collection
-chunk_index         INTEGER     order within the document
-text                TEXT        chunk content
-embedding           VECTOR(384) pgvector embedding (FastEmbed multilingual MiniLM)
-page_label          VARCHAR     optional page reference
-metadata            JSON        document_id, professor_collection, source_filename
-created_at          TIMESTAMP
-```
+Chunk embeddings are **not** stored in PostgreSQL. Each professor has a Qdrant collection; points carry `document_id`, `source_filename`, `chunk_index`, and `page_label` in the payload.
+
 
 ---
 
@@ -222,7 +216,7 @@ created_at          TIMESTAMP
 3.  Student speaks → browser transcribes with Web Speech API (SpeechRecognition)
 4.  Transcript (or typed fallback text) → POST /sessions/{id}/speak (JSON {"text": ...})
 5.  Redis: load last N messages (short-term memory / conversation context)
-6.  LlamaIndex: embed query → retrieve top-k chunks from pgvector (cosine distance, per professor)
+6.  LlamaIndex: embed query → retrieve top-k chunks from Qdrant (cosine, per professor collection)
 7.  Scope check (LLM): is the query related to the professor's topic?
     ├── IN SCOPE  → build prompt (system_prompt + history + retrieved context + query)
     │              → Z.AI GLM generates response text
@@ -256,9 +250,9 @@ Text extraction + cleaning
     ↓
 Chunking: 512 tokens, 50 token overlap, metadata tagging
     ↓
-Embedding: FastEmbed multilingual MiniLM (local, provider-independent)
+Embedding: Gemini gemini-embedding-001 (768-d, RETRIEVAL_DOCUMENT)
     ↓
-Insert rows into document_chunks (pgvector) with source_filename metadata
+Upsert points into the professor's Qdrant collection with source_filename metadata
     ↓
 Document status updated to "ready"
 ```
@@ -282,7 +276,7 @@ Document status updated to "ready"
 | `GET` | `/admin/professors/{id}/documents` | List professor's documents |
 | `GET` | `/admin/documents/{id}/chunks` | Paginated stored chunks for a document |
 | `GET` | `/admin/indexing/status` | Per-professor indexing statistics |
-| `DELETE` | `/admin/documents/{id}` | Remove document and its pgvector chunks |
+| `DELETE` | `/admin/documents/{id}` | Remove document and its Qdrant chunks |
 | `GET` | `/admin/sessions` | List all sessions with usage stats |
 | `GET` | `/admin/sessions/{id}/history` | Full conversation of a session |
 
@@ -325,11 +319,12 @@ virtual-professor/
 │   │   ├── services/
 │   │   │   ├── tts.py                ← Edge-TTS client (audio/mpeg)
 │   │   │   ├── llm.py                ← Z.AI GLM client + prompt building
-│   │   │   ├── embeddings.py         ← local FastEmbed adapter
-│   │   │   ├── rag.py                ← LlamaIndex + pgvector retrieval
+│   │   │   ├── embeddings.py         ← Gemini gemini-embedding-001 adapter
+│   │   │   ├── rag.py                ← LlamaIndex + Qdrant retrieval
 │   │   │   ├── reranker.py           ← BGE cross-encoder reranker
 │   │   │   ├── memory.py             ← Redis session context manager
 │   │   │   ├── ingestion.py          ← document processing pipeline
+│   │   │   ├── qdrant_store.py       ← Qdrant collections and point filters
 │   │   │   ├── liveavatar.py         ← LiveAvatar LITE connector
 │   │   │   └── langfuse.py           ← Langfuse observability helpers
 │   │   ├── models/
@@ -337,6 +332,7 @@ virtual-professor/
 │   │   │   └── schemas.py            ← Pydantic request/response schemas
 │   │   ├── core/
 │   │   │   ├── config.py             ← settings from environment variables
+│   │   │   ├── qdrant.py             ← Qdrant Cloud client factory
 │   │   │   └── database.py           ← DB session factory
 │   │   └── tests/
 │   │       ├── conftest.py           ← pytest fixtures + test client
@@ -401,7 +397,7 @@ The stack is defined in [`docker-compose.yml`](./docker-compose.yml) at the repo
 | `nginx` | nginx:alpine | Reverse proxy (dev just for convenience) |
 | `frontend` | custom Node.js | Next.js app. Real prod hosting is Render (`Dockerfile.prod`) |
 | `backend` | custom Python | FastAPI orchestrator |
-| `postgres` | pgvector/pgvector:pg16 | Relational DB + pgvector embeddings |
+| `postgres` | postgres:16 | Relational DB (Supabase in prod) |
 | `redis` | redis:7-alpine | Session cache |
 
 Development overrides (hot-reload, debug ports) live in `docker-compose.override.yml` and are applied automatically when you run `docker compose up`.
@@ -415,7 +411,7 @@ Development overrides (hot-reload, debug ports) live in `docker-compose.override
 Copy `.env.example` to `.env` and fill in the values.
 
 ```env
-# PostgreSQL (pgvector)
+# PostgreSQL (relational; Supabase in production)
 POSTGRES_USER=profesor
 POSTGRES_PASSWORD=changeme
 POSTGRES_DB=virtual_profesor
@@ -424,15 +420,20 @@ DATABASE_URL=postgresql://profesor:changeme@postgres:5432/virtual_profesor
 # Redis
 REDIS_URL=redis://redis:6379
 
+# Qdrant Cloud free tier — https://cloud.qdrant.io
+QDRANT_URL=https://xxxx.us-east-1-0.aws.cloud.qdrant.io:6333
+QDRANT_API_KEY=your-qdrant-api-key
+
 # Z.AI (GLM — chat LLM only; international API has no embedding models)
 ZAI_API_KEY=your-z-ai-api-key
 ZAI_BASE_URL=https://api.z.ai/api/paas/v4
 ZAI_LLM_MODEL=glm-4.7-flash
 
-# Embeddings (RAG). Local FastEmbed; no provider key is needed.
-EMBED_PROVIDER=fastembed
-EMBED_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-EMBED_DIM=384
+# Embeddings (RAG). Gemini gemini-embedding-001.
+GOOGLE_API_KEY=your-google-api-key
+EMBED_PROVIDER=gemini
+EMBED_MODEL=gemini-embedding-001
+EMBED_DIM=768
 
 # Edge-TTS
 EDGE_TTS_VOICE_EN=en-US-JennyNeural
@@ -467,7 +468,7 @@ SESSION_TIMEOUT_MINUTES=30
 | 1 | LiveAvatar API key + sandbox | Pending | Register at liveavatar.com to get key and test LITE mode |
 | 2 | LLM model selection | Pending | Start with free `glm-4.7-flash` or paid `glm-5` |
 | 3 | Edge-TTS voice tuning | Done | ES/EN voices via `EDGE_TTS_VOICE_ES` / `EDGE_TTS_VOICE_EN` |
-| 4 | Embedding size lock | Done | pgvector column is fixed `VECTOR(384)` (multilingual MiniLM) |
+| 4 | Embedding size lock | Done | Qdrant collections are `size=768` (`gemini-embedding-001`) |
 | 5 | Admin auth | **In progress** | See [plan 02](docs/plans/02-auth-backend.md) |
 | 6 | Student auth | **In progress** | See [plan 03](docs/plans/03-auth-frontend.md) |
 | 7 | RAG source citations in frontend | **In progress** | See [plan 04](docs/plans/04-rag-visible.md) |
@@ -481,6 +482,8 @@ SESSION_TIMEOUT_MINUTES=30
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
 - A [Z.AI](https://z.ai) API key (free `glm-4.7-flash` / `glm-4.5-flash` models are listed on [pricing](https://docs.z.ai/guides/overview/pricing))
+- A [Google AI Studio](https://aistudio.google.com/apikey) API key for `gemini-embedding-001`
+- A [Qdrant Cloud](https://cloud.qdrant.io) free-tier cluster (URL + API key)
 - A LiveAvatar account and API key (register at liveavatar.com — sandbox mode is free)
 
 ---
@@ -497,6 +500,7 @@ cp .env.example .env
 
 Open `.env` and set at minimum:
 - `ZAI_API_KEY` — your key from [z.ai](https://z.ai)
+- `QDRANT_URL` / `QDRANT_API_KEY` — free cluster at [cloud.qdrant.io](https://cloud.qdrant.io)
 - `LIVEAVATAR_API_KEY` — your key from liveavatar.com
 - `POSTGRES_PASSWORD` — any secure password
 - `ADMIN_API_KEY` — any secret you'll use to call `/admin` endpoints
@@ -633,31 +637,35 @@ docker compose down -v
 
 ## Cloud deployment (Render only)
 
-Render hosts the frontend, API, and a volatile Redis cache. Supabase hosts the
-persistent PostgreSQL database with pgvector.
+Render hosts the frontend, API, and a volatile Redis cache. Supabase hosts
+persistent PostgreSQL (relational data only). Qdrant Cloud free tier hosts
+the vector collections.
 
 | Piece | Where | Config |
 |---|---|---|
 | Frontend | Render Blueprint | `virtual-professor-frontend` — Next.js standalone, health `/` |
 | API | Render Blueprint | `virtual-professor-api` — health `/health` |
-| Postgres (pgvector) | Supabase | Project database connection string |
+| Postgres | Supabase | Project database connection string |
+| Vectors | Qdrant Cloud (free) | Cluster URL + API key |
 | Redis | Render Key Value | `virtual-professor-redis` (private) |
 
 The browser calls the Render API directly (`NEXT_PUBLIC_API_URL` is baked into the frontend at **build time** via a Docker build arg pointing at the API origin). Do **not** proxy `/speak` or document uploads through the frontend — keep them hitting the API origin directly.
 
 ### 1. Deploy the blueprint
 
-1. Create a Supabase project and enable the `vector` extension in SQL Editor.
-2. Copy its **Session pooler** connection string and convert it to
-   `postgresql+asyncpg://` for `DATABASE_URL`.
+1. Create a [Qdrant Cloud](https://cloud.qdrant.io) cluster on the **free tier**. Copy the
+   cluster URL (`https://….cloud.qdrant.io:6333`) and an API key.
+2. Create a Supabase project. Copy its **Session pooler** connection string and
+   convert it to `postgresql+asyncpg://` for `DATABASE_URL`. The `vector`
+   extension is no longer required.
 3. Push this branch to GitHub.
 4. In Render: **New → Blueprint** → select the repo. Render reads
    [`render.yaml`](./render.yaml).
-5. Set `DATABASE_URL`, `ZAI_API_KEY`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD`
-   in the API service environment.
+5. Set `DATABASE_URL`, `ZAI_API_KEY`, `GOOGLE_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`,
+   `ADMIN_EMAIL`, and `ADMIN_PASSWORD` in the API service environment.
 6. Wait until `virtual-professor-api` and
    `virtual-professor-frontend` are Live.
-   - API: `https://virtual-professor-api.onrender.com/health`
+   - API: `https://virtual-professor-api.onrender.com/health` (includes a `qdrant` probe)
    - Frontend: `https://virtual-professor-frontend.onrender.com/`
 
 ### 2. CORS
@@ -666,26 +674,16 @@ The browser calls the Render API directly (`NEXT_PUBLIC_API_URL` is baked into t
 
 ### 3. Vectorize knowledge
 
-The API enables `pgvector` and creates tables on boot. If
-`document_chunks.embedding` is not `VECTOR(384)`, it truncates old vectors
-and resizes the column (Z.AI `embedding-3` used `VECTOR(1024)`, which
-rejects FastEmbed's 384-d vectors).
+The API creates relational tables on boot. Embeddings are upserted into
+Qdrant Cloud (`VECTOR` size 768, cosine) **on upload**, not at startup.
+Keep `RERANKER_TYPE=none` on Render Free so the BGE cross-encoder is not
+loaded into the 512MB instance.
 
-Documents are embedded **on upload**, not at startup. Render Free has
-**512MB RAM**; loading FastEmbed (~220MB) during boot would OOM-kill the
-API before `/health` passed. The production image also skips PyTorch and
-the BGE reranker for the same reason.
-
-If vectorization still dies after an upload (document stuck on `pending`
-or `error`), the instance ran out of memory. Upgrade
-`virtual-professor-api` from **Free (512MB)** to **Standard (2GB)** and
-re-upload the file.
-
-The FastEmbed model is baked into the API image, so the first upload does
-not wait on a Hugging Face download.
+If a document stays on `pending` or `error` after upload, check
+`GOOGLE_API_KEY` and Qdrant, then re-index from the admin UI.
 
 Render Free services have ephemeral filesystems, so uploaded source files are
-lost on restart. Indexed chunks remain in Supabase. If a document shows
+lost on restart. Indexed chunks remain in Qdrant Cloud. If a document shows
 `SOURCE_MISSING`, re-upload it from the admin UI.
 
 Default model is free `glm-4.7-flash`. Paid GLM-5: set `ZAI_LLM_MODEL=glm-5` on the API service.
@@ -703,14 +701,14 @@ Default model is free `glm-4.7-flash`. Paid GLM-5: set `ZAI_LLM_MODEL=glm-5` on 
 | Avatar & WebRTC | LiveAvatar LITE |
 | Speech-to-Text | Browser Web Speech API (+ text fallback) |
 | LLM | Z.AI GLM (`glm-4.7-flash` free / `glm-5` paid) |
-| Embeddings | FastEmbed multilingual MiniLM (local, 384 dims) |
+| Embeddings | Gemini `gemini-embedding-001` (768 dims) |
 | RAG Framework | LlamaIndex |
-| Vector Database | PostgreSQL + pgvector |
+| Vector Database | Qdrant Cloud (free tier) |
 | Reranker | BGE cross-encoder (local) |
 | Text-to-Speech | Edge-TTS (Microsoft neural voices) |
 | Backend | FastAPI (Python) |
 | Frontend | Next.js (TypeScript) |
-| Relational DB | PostgreSQL 16 |
+| Relational DB | PostgreSQL 16 (Supabase) |
 | Session Cache | Redis 7 |
 | Observability | Langfuse (self-hosted) |
 | Container | Docker Compose |

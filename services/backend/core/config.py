@@ -11,8 +11,13 @@ class Settings(BaseSettings):
     # Debug
     debug: bool = False
 
-    # Database
+    # Database (Supabase PostgreSQL — relational data only)
     database_url: str
+
+    # Qdrant Cloud (free tier) or a local Qdrant URL
+    # Cloud: https://xxxx.us-east-1-0.aws.cloud.qdrant.io:6333 + QDRANT_API_KEY
+    qdrant_url: str
+    qdrant_api_key: str = ""
 
     # FastAPI root path. Use "/api" behind nginx; leave empty on Render.
     root_path: str = ""
@@ -31,11 +36,13 @@ class Settings(BaseSettings):
     zai_base_url: str = "https://api.z.ai/api/paas/v4"
     zai_llm_model: str = "glm-4.7-flash"
     zai_fallback_llm_model: str = "glm-4.5-flash"
-    # Local FastEmbed model: no API key or metered provider is required.
-    embed_provider: str = "fastembed"
-    embed_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    embed_dim: int = 384  # must match the pgvector column size
-    # Loading FastEmbed on boot OOMs Render Free (512MB). Uploads still embed.
+    # Gemini embeddings (RAG). Key: GOOGLE_API_KEY or GEMINI_API_KEY.
+    google_api_key: str = ""
+    gemini_api_key: str = ""
+    embed_provider: str = "gemini"
+    embed_model: str = "gemini-embedding-001"
+    embed_dim: int = 768  # must match the Qdrant collection size (768 / 1536 / 3072)
+    # Re-embed leftover docs on boot. Keep false on Render Free (ephemeral disk).
     embed_resume_on_startup: bool = True
     llm_max_tokens: int = 350  # max tokens per LLM response (env: LLM_MAX_TOKENS)
 
@@ -74,7 +81,7 @@ class Settings(BaseSettings):
     reranker_device: str = "cpu"
 
     # Retrieval
-    rag_retrieval_top_k: int = 40  # env: RAG_RETRIEVAL_TOP_K (chunks to retrieve from pgvector)
+    rag_retrieval_top_k: int = 40  # env: RAG_RETRIEVAL_TOP_K (chunks to retrieve from Qdrant)
 
     # Upload validation
     upload_max_size_mb: int = 50
@@ -145,11 +152,37 @@ class Settings(BaseSettings):
             return parts if parts else ["*"]
         return ["*"]
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    model_config = {
+        "env_file": (".env", "../.env", "../../.env"),
+        "extra": "ignore",
+    }
 
     def validate_production(self) -> list[str]:
         """Check production-critical settings and return a list of warnings/errors."""
         warnings: list[str] = []
+
+        # ── Qdrant Cloud ────────────────────────────────────────────────────
+        qdrant_url = (self.qdrant_url or "").strip()
+        qdrant_host = qdrant_url.lower()
+        if (
+            not qdrant_url.startswith("https://")
+            or "cloud.qdrant.io" not in qdrant_host
+            or "your-cluster" in qdrant_host
+            or "xxxx" in qdrant_host
+        ):
+            raise RuntimeError(
+                "QDRANT_URL must be a Qdrant Cloud cluster "
+                "(https://….cloud.qdrant.io:6333). "
+                "Create a free cluster at https://cloud.qdrant.io and paste the URL."
+            )
+        if not self.qdrant_api_key or self.qdrant_api_key in (
+            "changeme",
+            "your-qdrant-api-key",
+        ):
+            raise RuntimeError(
+                "QDRANT_API_KEY is required for Qdrant Cloud. "
+                "Copy the API key from the cluster dashboard."
+            )
 
         # ── Z.AI API key ────────────────────────────────────────────────────
         if not self.zai_api_key or self.zai_api_key in (
@@ -160,6 +193,19 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "ZAI_API_KEY is empty or set to a placeholder. "
                 "Create a key at https://z.ai and set ZAI_API_KEY."
+            )
+
+        # ── Gemini embeddings ───────────────────────────────────────────────
+        google_key = (self.google_api_key or self.gemini_api_key).strip()
+        if not google_key or google_key in (
+            "changeme",
+            "your-google-api-key",
+            "your-gemini-api-key",
+        ):
+            raise RuntimeError(
+                "GOOGLE_API_KEY is empty or set to a placeholder. "
+                "Create a key at https://aistudio.google.com/apikey "
+                "for gemini-embedding-001."
             )
 
         # ── JWT secret key ──────────────────────────────────────────────────

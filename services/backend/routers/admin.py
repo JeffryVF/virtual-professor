@@ -1,4 +1,4 @@
-import json
+import asyncio
 import logging
 import os
 import shutil
@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.database import get_db
 from dependencies.auth import require_admin, verify_admin_or_deprecated_key
-from models.db import Document, DocumentChunk, DocumentStatus, Message, Professor
+from models.db import Document, DocumentStatus, Message, Professor
 from models.db import Session as DBSession
 from models.schemas import (
     ChunkDetail,
@@ -34,6 +34,7 @@ from services.ingestion import (
     document_source_path,
     ingest_document,
 )
+from services.qdrant_store import count_collection_points, list_document_points
 
 
 log = logging.getLogger(__name__)
@@ -304,7 +305,7 @@ async def get_document_chunks(
     db: AsyncSession = Depends(get_db),
     _=Depends(verify_admin_or_deprecated_key),
 ):
-    """Return paginated chunks for a specific document from pgvector."""
+    """Return paginated chunks for a specific document from Qdrant."""
     result = await db.execute(select(Document).where(Document.id == document_id))
     doc = result.scalar_one_or_none()
     if not doc:
@@ -316,28 +317,23 @@ async def get_document_chunks(
             detail=f"Document status is '{doc.status.value}', expected 'ready'",
         )
 
-    count_result = await db.execute(
-        select(func.count(DocumentChunk.id)).where(DocumentChunk.document_id == document_id)
-    )
-    total = count_result.scalar() or 0
+    prof_result = await db.execute(select(Professor).where(Professor.id == doc.professor_id))
+    prof = prof_result.scalar_one()
 
-    chunk_result = await db.execute(
-        select(DocumentChunk.text, DocumentChunk.page_label, DocumentChunk.chunk_index)
-        .where(DocumentChunk.document_id == document_id)
-        .order_by(DocumentChunk.chunk_index)
-        .offset(offset)
-        .limit(limit)
-    )
+    stored = await asyncio.to_thread(list_document_points, prof.collection, str(document_id))
+    total = len(stored)
+    page = stored[offset : offset + limit]
 
     chunks: list[ChunkDetail] = []
-    for text_content, page_label, chunk_index in chunk_result.all():
+    for item in page:
+        text_content = item["text"]
         display_text = text_content[:500] if not full else text_content
         chunks.append(
             ChunkDetail(
-                chunk_index=chunk_index,
+                chunk_index=item["chunk_index"],
                 text=display_text,
                 score=None,
-                page_number=page_label,
+                page_number=item["page_label"],
             )
         )
 
@@ -465,13 +461,8 @@ async def get_indexing_status(
         )
         last_error = last_error_result.scalar_one_or_none()
 
-        # Stored chunk count (rows actually in pgvector for this collection)
-        stored_chunks_result = await db.execute(
-            select(func.count(DocumentChunk.id)).where(
-                DocumentChunk.professor_collection == prof.collection
-            )
-        )
-        stored_chunks = stored_chunks_result.scalar() or 0
+        # Stored chunk count (points actually in Qdrant for this collection)
+        stored_chunks = await asyncio.to_thread(count_collection_points, prof.collection)
 
         collection_statuses.append(
             CollectionStatus(

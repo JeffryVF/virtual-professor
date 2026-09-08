@@ -24,13 +24,14 @@ slowapi>=0.1.9
 
 # RAG
 llama-index-core>=0.10.0
-fastembed>=0.4.0
+google-genai>=1.0.0
 openai>=1.0.0
 llama-index-readers-file>=0.1.0
 llama-index-readers-web>=0.1.0
 
-# Vector storage (pgvector inside Postgres)
-pgvector>=0.2.0
+# Vector storage (Qdrant Cloud)
+qdrant-client>=1.9.0
+llama-index-vector-stores-qdrant>=0.2.0
 
 # TTS (Edge-TTS — no local model/service)
 edge-tts>=6.1.0

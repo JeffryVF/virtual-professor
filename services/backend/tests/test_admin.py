@@ -8,30 +8,42 @@ import pytest_asyncio
 from uuid import UUID
 
 from core.config import settings
-from models.db import Document, DocumentChunk, DocumentStatus, Language, Professor
+from models.db import Document, DocumentStatus, Language, Professor
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def qdrant_payload_store(monkeypatch):
+    """In-memory stand-in for Qdrant points used by admin chunk endpoints."""
+    store: dict[tuple[str, str], list[dict]] = {}
+
+    def list_points(collection_name: str, document_id: str):
+        return list(store.get((collection_name, str(document_id)), []))
+
+    def count_points(collection_name: str) -> int:
+        return sum(len(v) for (c, _), v in store.items() if c == collection_name)
+
+    monkeypatch.setattr("routers.admin.list_document_points", list_points)
+    monkeypatch.setattr("routers.admin.count_collection_points", count_points)
+    return store
+
+
 @pytest_asyncio.fixture
-async def ready_doc_chunks(db_session, test_professor, test_document_ready):
-    """Insert ``n`` chunks pointing at the ready document (pgvector rows)."""
+async def ready_doc_chunks(qdrant_payload_store, test_professor, test_document_ready):
+    """Store ``n`` fake Qdrant payloads for the ready document."""
+
     async def _add(n: int, text_factory=lambda i: f"Chunk {i} content here"):
-        chunks = []
-        for i in range(n):
-            chunks.append(
-                DocumentChunk(
-                    document_id=test_document_ready.id,
-                    professor_collection=test_professor.collection,
-                    chunk_index=i,
-                    text=text_factory(i),
-                    page_label=str(i + 1),
-                    embedding=[0.0] * settings.embed_dim,
-                )
-            )
-        db_session.add_all(chunks)
-        await db_session.commit()
+        chunks = [
+            {
+                "chunk_index": i,
+                "text": text_factory(i),
+                "page_label": str(i + 1),
+            }
+            for i in range(n)
+        ]
+        qdrant_payload_store[(test_professor.collection, str(test_document_ready.id))] = chunks
         return chunks
 
     return _add
@@ -183,7 +195,7 @@ class TestGetDocumentChunks:
     async def test_chunks_with_points(
         self, async_client, admin_token, test_document_ready, ready_doc_chunks
     ):
-        """GIVEN a ready document with stored pgvector chunks
+        """GIVEN a ready document with stored Qdrant chunks
         WHEN GET /admin/documents/{document_id}/chunks
         THEN returns paginated chunks with correct fields.
         """
@@ -361,7 +373,7 @@ class TestGetIndexingStatus:
         assert col["documents_by_status"]["pending"] == 1
         assert col["documents_by_status"]["error"] == 1
         assert col["total_chunks"] == 5  # only ready doc has chunk_count=5
-        assert col["stored_chunks"] == 3  # rows actually in pgvector for this collection
+        assert col["stored_chunks"] == 3  # points actually in Qdrant for this collection
         assert col["last_indexed_at"] is not None  # ready doc has uploaded_at
         assert col["last_error"] == "Something went wrong"
 
