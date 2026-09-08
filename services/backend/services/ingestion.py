@@ -1,3 +1,5 @@
+import logging
+
 import fitz
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.readers.base import BaseReader
@@ -14,6 +16,7 @@ from services.embeddings import get_embed_model
 
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50
+log = logging.getLogger(__name__)
 
 _FORMAT_READERS: dict[str, type[BaseReader]] = {
     "pdf": PDFReader,
@@ -74,6 +77,13 @@ async def ingest_document(
 
     async with AsyncSessionLocal() as db:
         try:
+            result = await db.execute(select(Document).where(Document.id == document_id))
+            doc = result.scalar_one()
+            doc.status = DocumentStatus.processing
+            doc.error_message = None
+            await db.commit()
+            log.info("Starting document ingestion: document_id=%s format=%s", document_id, file_format)
+
             # Pre-ingestion validation
             is_valid, error_msg = _validate_document(
                 file_path,
@@ -81,11 +91,10 @@ async def ingest_document(
                 max_pages=settings.upload_max_pages,
             )
             if not is_valid:
-                result = await db.execute(select(Document).where(Document.id == document_id))
-                doc = result.scalar_one()
                 doc.status = DocumentStatus.error
                 doc.error_message = error_msg
                 await db.commit()
+                log.warning("Document validation failed: document_id=%s error=%s", document_id, error_msg)
                 return
 
             embed_model = get_embed_model()
@@ -110,11 +119,10 @@ async def ingest_document(
 
             # Post-parse validation: ensure at least one non-empty node
             if not nodes or all(not node.get_content().strip() for node in nodes):
-                result = await db.execute(select(Document).where(Document.id == document_id))
-                doc = result.scalar_one()
                 doc.status = DocumentStatus.error
                 doc.error_message = "EMPTY_CHUNKS: Document produced no usable text content after chunking"
                 await db.commit()
+                log.warning("Document produced no chunks: document_id=%s", document_id)
                 return
 
             # Fetch document for source_filename metadata
@@ -151,6 +159,7 @@ async def ingest_document(
             doc.status = DocumentStatus.ready
             doc.chunk_count = len(nodes)
             await db.commit()
+            log.info("Document ingestion completed: document_id=%s chunks=%s", document_id, len(nodes))
 
         except Exception as exc:
             result = await db.execute(select(Document).where(Document.id == document_id))
@@ -158,6 +167,7 @@ async def ingest_document(
             doc.status = DocumentStatus.error
             doc.error_message = str(exc)
             await db.commit()
+            log.exception("Document ingestion failed: document_id=%s", document_id)
             raise
 
 
