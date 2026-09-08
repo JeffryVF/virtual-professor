@@ -41,6 +41,21 @@ async def test_professor(db_session):
 
 
 @pytest.mark.asyncio
+async def test_create_student_defaults_to_english_and_reuses_email(async_client):
+    payload = {"name": "Reuse Student", "email": "reuse-student@test.com"}
+    first = await async_client.post("/sessions/students", json=payload)
+    assert first.status_code == 201
+    assert first.json()["language"] == "en"
+
+    second = await async_client.post(
+        "/sessions/students",
+        json={**payload, "name": "Different Name"},
+    )
+    assert second.status_code == 201
+    assert second.json()["id"] == first.json()["id"]
+
+
+@pytest.mark.asyncio
 async def test_threshold_failure_creates_notification(
     async_app, async_client, test_professor, db_session
 ):

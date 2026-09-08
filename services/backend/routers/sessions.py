@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -57,9 +58,20 @@ def _truncate_text_for_tts(total_text: str) -> str:
 
 @router.post("/students", response_model=StudentResponse, status_code=201)
 async def create_student(data: StudentCreate, db: AsyncSession = Depends(get_db)):
+    existing = await db.execute(select(Student).where(Student.email == data.email))
+    student = existing.scalar_one_or_none()
+    if student:
+        return student
+
     student = Student(**data.model_dump())
     db.add(student)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        existing = await db.execute(select(Student).where(Student.email == data.email))
+        student = existing.scalar_one()
+        return student
     await db.refresh(student)
     return student
 

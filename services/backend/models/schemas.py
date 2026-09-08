@@ -73,7 +73,7 @@ class DocumentResponse(BaseModel):
 class StudentCreate(BaseModel):
     name: str
     email: str
-    language: LanguageEnum
+    language: LanguageEnum = LanguageEnum.en
 
 
 class StudentResponse(BaseModel):

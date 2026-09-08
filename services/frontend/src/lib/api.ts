@@ -199,8 +199,7 @@ export const reindexDocument = (documentId: string) =>
 
 // ── Students & Sessions ───────────────────────────────────────────────────────
 
-export const createStudent = (name: string, language: Language) => {
-  const email = `${name.toLowerCase().replace(/\s+/g, '.')}.${Date.now()}@virtualprofesor.edu`
+export const createStudent = (name: string, email: string, language: Language = 'en') => {
   return authRequest<Student>('/sessions/students', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

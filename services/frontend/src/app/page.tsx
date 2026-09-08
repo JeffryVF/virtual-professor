@@ -4,32 +4,22 @@ import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import { Loader2, BookOpen, LogOut } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import ProfessorCard from '@/components/student/ProfessorCard'
-import { getPublicProfessors, createStudent, createSession, type Professor, type Language } from '@/lib/api'
+import { getPublicProfessors, createStudent, createSession, type Professor } from '@/lib/api'
 import { useAuth } from '@/contexts/AuthContext'
 
 const STUDENT_KEY = 'vp_student_id'
 
 export default function StudentPortal() {
   const router = useRouter()
-  const { logout: authLogout, isAuthenticated } = useAuth()
+  const { user, isLoading: authLoading, logout: authLogout, isAuthenticated } = useAuth()
   const [professors, setProfessors] = useState<Professor[]>([])
   const [loading, setLoading] = useState(true)
   const [noProfessors, setNoProfessors] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Professor | null>(null)
-  const [name, setName] = useState('')
-  const [language, setLanguage] = useState<Language>('es')
   const [starting, setStarting] = useState(false)
-  const [hasStudentId, setHasStudentId] = useState(false)
-
-  useEffect(() => {
-    setHasStudentId(!!localStorage.getItem(STUDENT_KEY))
-  }, [])
 
   useEffect(() => {
     getPublicProfessors()
@@ -49,17 +39,26 @@ export default function StudentPortal() {
       .finally(() => setLoading(false))
   }, [router])
 
+  function handleSelectProfessor(prof: Professor) {
+    if (authLoading) return
+    if (!isAuthenticated) {
+      router.push('/login?redirect=/')
+      return
+    }
+    setSelected(prof)
+  }
+
   async function handleStart() {
-    if (!selected || !name.trim()) return
+    if (!selected) return
+    if (!user) {
+      router.push('/login?redirect=/')
+      return
+    }
     setStarting(true)
     try {
-      let studentId = localStorage.getItem(STUDENT_KEY)
-      if (!studentId) {
-        const student = await createStudent(name.trim(), language)
-        studentId = student.id
-        localStorage.setItem(STUDENT_KEY, studentId)
-      }
-      const session = await createSession(studentId, selected.id)
+      const student = await createStudent(user.name, user.email)
+      localStorage.setItem(STUDENT_KEY, student.id)
+      const session = await createSession(student.id, selected.id)
       router.push(`/session/${session.id}?professor=${selected.id}`)
     } catch (err) {
       toast.error(String(err))
@@ -70,11 +69,8 @@ export default function StudentPortal() {
   function handleLogout() {
     localStorage.removeItem(STUDENT_KEY)
     if (isAuthenticated) authLogout()
-    setHasStudentId(false)
     toast.success('Sesión cerrada')
   }
-
-  const showLogout = hasStudentId || isAuthenticated
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -82,7 +78,7 @@ export default function StudentPortal() {
       <header className="bg-white border-b px-6 py-4 flex items-center gap-2">
         <BookOpen className="h-5 w-5 text-primary" />
         <span className="font-semibold">Virtual Professor</span>
-        {showLogout && (
+        {isAuthenticated && (
           <button
             onClick={handleLogout}
             className="ml-auto flex items-center gap-2 rounded-md bg-black px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-gray-800"
@@ -118,7 +114,7 @@ export default function StudentPortal() {
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {professors.map(prof => (
-              <ProfessorCard key={prof.id} professor={prof} onClick={() => setSelected(prof)} />
+              <ProfessorCard key={prof.id} professor={prof} onClick={() => handleSelectProfessor(prof)} />
             ))}
           </div>
         )}
@@ -131,26 +127,10 @@ export default function StudentPortal() {
             <DialogTitle>Start session with {selected?.name}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 mt-2">
-            <div className="space-y-1.5">
-              <Label>Your name</Label>
-              <Input
-                value={name}
-                onChange={e => setName(e.target.value)}
-                placeholder="Ana López"
-                autoFocus
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Language</Label>
-              <Select value={language} onValueChange={v => setLanguage(v as Language)}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="es">Spanish</SelectItem>
-                  <SelectItem value="en">English</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <Button className="w-full" onClick={handleStart} disabled={!name.trim() || starting}>
+            {user?.name && (
+              <p className="text-sm text-muted-foreground">You will join as {user.name}.</p>
+            )}
+            <Button className="w-full" onClick={handleStart} disabled={starting || !user}>
               {starting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
               {starting ? 'Starting…' : 'Start session'}
             </Button>
