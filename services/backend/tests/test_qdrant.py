@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
 from llama_index.core.vector_stores.utils import node_to_metadata_dict
+from pydantic import ValidationError
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
 
@@ -65,12 +66,57 @@ def test_chunk_from_payload_reads_llama_index_node_content():
     assert chunk["page_label"] == "9"
 
 
+def test_settings_reject_example_qdrant_url():
+    with pytest.raises(ValidationError, match="QDRANT_URL"):
+        Settings(
+            database_url="postgresql://x",
+            redis_url="redis://localhost",
+            qdrant_url="https://your-cluster.qdrant.io:6333",
+            qdrant_api_key="cloud-key",
+            admin_api_key="k",
+            jwt_secret_key="secret-secret-secret-secret",
+            rag_min_relevance_score=0.2,
+            zai_api_key="zai",
+            google_api_key="google",
+        )
+
+
+def test_settings_reject_example_xxxx_cloud_url():
+    with pytest.raises(ValidationError, match="QDRANT_URL"):
+        Settings(
+            database_url="postgresql://x",
+            redis_url="redis://localhost",
+            qdrant_url="https://xxxx.us-east-1-0.aws.cloud.qdrant.io:6333",
+            qdrant_api_key="cloud-key",
+            admin_api_key="k",
+            jwt_secret_key="secret-secret-secret-secret",
+            rag_min_relevance_score=0.2,
+            zai_api_key="zai",
+            google_api_key="google",
+        )
+
+
+def test_settings_require_api_key_for_qdrant_cloud_url():
+    with pytest.raises(ValidationError, match="QDRANT_API_KEY"):
+        Settings(
+            database_url="postgresql://x",
+            redis_url="redis://localhost",
+            qdrant_url=CLOUD_URL,
+            qdrant_api_key="",
+            admin_api_key="k",
+            jwt_secret_key="secret-secret-secret-secret",
+            rag_min_relevance_score=0.2,
+            zai_api_key="zai",
+            google_api_key="google",
+        )
+
+
 def test_production_requires_qdrant_cloud_url():
     cfg = Settings(
         database_url="postgresql://x",
         redis_url="redis://localhost",
-        qdrant_url="https://your-cluster.qdrant.io:6333",
-        qdrant_api_key="cloud-key",
+        qdrant_url="http://localhost:6333",
+        qdrant_api_key="",
         admin_api_key="k",
         jwt_secret_key="secret-secret-secret-secret",
         rag_min_relevance_score=0.2,
@@ -86,13 +132,14 @@ def test_production_requires_qdrant_cloud_api_key():
         database_url="postgresql://x",
         redis_url="redis://localhost",
         qdrant_url=CLOUD_URL,
-        qdrant_api_key="",
+        qdrant_api_key="cloud-key",
         admin_api_key="k",
         jwt_secret_key="secret-secret-secret-secret",
         rag_min_relevance_score=0.2,
         zai_api_key="zai",
         google_api_key="google",
     )
+    cfg.qdrant_api_key = ""
     with pytest.raises(RuntimeError, match="QDRANT_API_KEY"):
         cfg.validate_production()
 
