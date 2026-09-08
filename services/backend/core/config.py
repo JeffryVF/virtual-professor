@@ -1,7 +1,7 @@
 import json
 import logging
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 log = logging.getLogger(__name__)
@@ -104,6 +104,36 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://localhost:3001",
     ]
+
+    @field_validator("qdrant_url")
+    @classmethod
+    def _reject_example_qdrant_url(cls, value: str) -> str:
+        host = (value or "").strip().lower()
+        if not host:
+            raise ValueError(
+                "QDRANT_URL is required. Create a free cluster at "
+                "https://cloud.qdrant.io"
+            )
+        if "your-cluster" in host or "xxxx" in host:
+            raise ValueError(
+                "QDRANT_URL is still the example placeholder. "
+                "Create a free cluster at https://cloud.qdrant.io and paste "
+                "https://….cloud.qdrant.io:6333"
+            )
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _require_api_key_for_qdrant_cloud(self):
+        url = (self.qdrant_url or "").lower()
+        key = (self.qdrant_api_key or "").strip()
+        if "cloud.qdrant.io" in url and (
+            not key or key in ("changeme", "your-qdrant-api-key")
+        ):
+            raise ValueError(
+                "QDRANT_API_KEY is required for Qdrant Cloud. "
+                "Copy the API key from the cluster dashboard."
+            )
+        return self
 
     @field_validator("database_url", mode="before")
     @classmethod
