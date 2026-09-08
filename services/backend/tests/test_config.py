@@ -103,6 +103,7 @@ def test_compose_and_env_example_target_qdrant_cloud():
     example_text = example.read_text(encoding="utf-8")
     assert "pgvector/pgvector" not in compose_text
     assert "image: postgres:16" in compose_text
+    assert "\n  qdrant:" not in compose_text
     assert "QDRANT_URL=${QDRANT_URL}" in compose_text
     assert "QDRANT_API_KEY=${QDRANT_API_KEY}" in compose_text
     assert "QDRANT_URL=" in example_text
