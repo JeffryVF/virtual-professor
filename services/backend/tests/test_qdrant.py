@@ -3,8 +3,11 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from llama_index.core import StorageContext, VectorStoreIndex
+from llama_index.core.embeddings import MockEmbedding
 from llama_index.core.schema import NodeRelationship, RelatedNodeInfo, TextNode
 from llama_index.core.vector_stores.utils import node_to_metadata_dict
+from llama_index.vector_stores.qdrant import QdrantVectorStore
 from pydantic import ValidationError
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct
@@ -268,3 +271,44 @@ def test_in_memory_qdrant_collection_filter_and_search():
     hits = client.query_points(collection_name="prof_demo", query=alpha, limit=1)
     assert hits.points[0].id == 1
     assert hits.points[0].payload["text"] == "alpha"
+
+
+def test_llamaindex_ingest_and_search_roundtrip_in_memory_qdrant():
+    """Ingest via LlamaIndex QdrantVectorStore and retrieve by cosine similarity."""
+    client = QdrantClient(":memory:")
+    with patch("services.qdrant_store.settings") as mock_settings:
+        mock_settings.embed_dim = 8
+        ensure_collection(client, "prof_roundtrip")
+
+    node = TextNode(text="La fotosintesis ocurre en las plantas")
+    stamp_chunk_document_id(node, "doc-plants")
+    node.metadata["source_filename"] = "bio.pdf"
+    node.metadata["chunk_index"] = 0
+    node.metadata["page_label"] = "1"
+
+    embed = MockEmbedding(embed_dim=8)
+    vector_store = QdrantVectorStore(client=client, collection_name="prof_roundtrip")
+    storage_context = StorageContext.from_defaults(vector_store=vector_store)
+    index = VectorStoreIndex(
+        [node],
+        storage_context=storage_context,
+        embed_model=embed,
+    )
+
+    records, _offset = client.scroll(
+        collection_name="prof_roundtrip",
+        scroll_filter=_document_filter("doc-plants"),
+        with_payload=True,
+        limit=10,
+    )
+    assert len(records) == 1
+    payload = records[0].payload or {}
+    assert payload.get("document_id") == "doc-plants"
+    assert payload.get(VP_DOCUMENT_ID_KEY) == "doc-plants"
+    assert payload.get("source_filename") == "bio.pdf"
+
+    retriever = index.as_retriever(similarity_top_k=1)
+    hits = retriever.retrieve("fotosintesis en plantas")
+    assert len(hits) == 1
+    assert "fotosintesis" in hits[0].get_content().lower()
+    assert hits[0].metadata.get("document_id") == "doc-plants"
