@@ -500,7 +500,9 @@ cp .env.example .env
 
 Open `.env` and set at minimum:
 - `ZAI_API_KEY` — your key from [z.ai](https://z.ai)
+- `GOOGLE_API_KEY` — Gemini embeddings from [Google AI Studio](https://aistudio.google.com/apikey)
 - `QDRANT_URL` / `QDRANT_API_KEY` — free cluster at [cloud.qdrant.io](https://cloud.qdrant.io)
+  (must be `https://….cloud.qdrant.io:6333`; example placeholders prevent the API from starting)
 - `LIVEAVATAR_API_KEY` — your key from liveavatar.com
 - `POSTGRES_PASSWORD` — any secure password
 - `ADMIN_API_KEY` — any secret you'll use to call `/admin` endpoints
@@ -521,6 +523,9 @@ docker compose up -d
 docker compose -f docker-compose.yml up -d
 ```
 
+Qdrant Cloud is **not** a Compose service. The backend talks to your free-tier cluster
+using `QDRANT_URL` and `QDRANT_API_KEY`. Postgres in Compose stores relational data only.
+
 Wait ~30 seconds for all services to initialise. Check status with:
 
 ```bash
@@ -536,7 +541,7 @@ The database tables are created automatically on first backend startup (SQLAlche
 
 | Service | URL | Expected response |
 |---|---|---|
-| Backend API | http://localhost/api/health | JSON with `"status": "healthy"` or `"degraded"` and `postgres`/`redis`/`zai` probes |
+| Backend API | http://localhost/api/health | JSON with `"status": "healthy"` or `"degraded"` and `postgres`/`redis`/`zai`/`qdrant`/`gemini` probes |
 | API Docs (Swagger) | http://localhost/api/docs | Interactive API UI |
 
 ---
