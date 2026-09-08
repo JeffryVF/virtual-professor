@@ -12,7 +12,7 @@ services:
   - type: keyvalue
     name: virtual-professor-redis
     ipAllowList: []
-    plan: 256mb
+    plan: free
     maxmemoryPolicy: allkeys-lru
 
   - type: web
