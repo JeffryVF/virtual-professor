@@ -9,7 +9,7 @@ interface AuthContextValue {
   user: AuthUser | null
   isLoading: boolean
   isAuthenticated: boolean
-  login: (credentials: LoginCredentials) => Promise<void>
+  login: (credentials: LoginCredentials) => Promise<AuthUser>
   logout: () => void
 }
 
@@ -33,6 +33,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (credentials: LoginCredentials) => {
       const result = await auth.login(credentials)
       setUser(result.user)
+      return result.user
     },
     []
   )

@@ -13,7 +13,7 @@ import * as auth from '@/lib/auth'
 function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const { login, isAuthenticated, isLoading } = useAuth()
+  const { login, user, isAuthenticated, isLoading } = useAuth()
 
   // Login state
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -35,6 +35,7 @@ function LoginForm() {
   // If there are no professors, redirect students to the student portal,
   // not the admin panel (which requires admin role).
   const redirectTo = isNoProfessors ? '/' : (searchParams.get('redirect') || '/')
+  const destinationFor = (role: string) => role === 'admin' ? '/admin' : redirectTo
 
   // Switch to register tab when redirected because no professors exist
   useEffect(() => {
@@ -49,17 +50,17 @@ function LoginForm() {
 
   useEffect(() => {
     if (!isLoading && isAuthenticated) {
-      router.push(redirectTo)
+      router.push(destinationFor(user?.role ?? ''))
     }
-  }, [isLoading, isAuthenticated, router, redirectTo])
+  }, [isLoading, isAuthenticated, router, user, redirectTo])
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
     setError('')
     setSubmitting(true)
     try {
-      await login({ email, password })
-      router.push(redirectTo)
+      const loggedInUser = await login({ email, password })
+      router.push(destinationFor(loggedInUser.role))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al iniciar sesión')
     } finally {
@@ -74,16 +75,16 @@ function LoginForm() {
     try {
       await auth.register({ name: regName, email: regEmail, password: regPassword })
       // Log in immediately after registering
-      await login({ email: regEmail, password: regPassword })
+      const loggedInUser = await login({ email: regEmail, password: regPassword })
       toast.success('Cuenta creada correctamente')
-      router.push(redirectTo)
+      router.push(destinationFor(loggedInUser.role))
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Error al registrarse'
       if (message.toLowerCase().includes('email already registered')) {
         try {
-          await login({ email: regEmail, password: regPassword })
+          const loggedInUser = await login({ email: regEmail, password: regPassword })
           toast.success('La cuenta ya existía. Iniciamos sesión correctamente.')
-          router.push(redirectTo)
+          router.push(destinationFor(loggedInUser.role))
           return
         } catch {
           setEmail(regEmail)
