@@ -69,18 +69,17 @@ def test_render_blueprint_declares_split_services():
         assert name in text
     assert "healthCheckPath: /health" in text
     assert "glm-4.7-flash" in text
-    assert "EMBED_PROVIDER" in text
-    assert "fastembed" in text
+    assert "CLOUDFLARE_ACCOUNT_ID" in text
+    assert "CLOUDFLARE_API_TOKEN" in text
+    assert "CLOUDFLARE_AI_SEARCH_INSTANCE" in text
     assert "plan: free" in text
-    assert "FASTEMBED_CACHE_PATH" in text
     assert "EMBED_RESUME_ON_STARTUP" in text
-    assert "MALLOC_ARENA_MAX" in text
     assert "DATABASE_URL" in text
     assert "NEXT_PUBLIC_API_URL" in text
     assert "dockerfilePath: ./services/frontend/Dockerfile.prod" in text
 
 
-def test_api_dockerfile_omits_torch_for_render_ram():
+def test_api_dockerfile_stays_slim_without_local_rag_models():
     path = None
     for parent in Path(__file__).resolve().parents:
         candidate = parent / "Dockerfile"
@@ -90,8 +89,8 @@ def test_api_dockerfile_omits_torch_for_render_ram():
     if path is None:
         pytest.skip("backend Dockerfile not available from this test path")
     text = path.read_text(encoding="utf-8")
-    assert "extra-index-url" not in text
-    assert "grep -vE" in text
+    assert "fastembed" not in text.lower()
+    assert "torch" not in text.lower()
     assert "--workers 1" in text
 
 

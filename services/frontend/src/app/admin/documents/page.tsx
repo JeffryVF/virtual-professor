@@ -178,7 +178,7 @@ export default function AdminDocumentsPage() {
                   <TableHead>Documentos</TableHead>
                   <TableHead>Estado</TableHead>
                   <TableHead>Chunks</TableHead>
-                  <TableHead>En pgvector</TableHead>
+                  <TableHead>En Cloudflare</TableHead>
                   <TableHead>Última indexación</TableHead>
                   <TableHead className="text-right">Acciones</TableHead>
                 </TableRow>

@@ -1,25 +1,14 @@
-"""Tests for ingestion metadata enrichment (CRIT-03).
-
-Verifies that source_filename is injected into stored DocumentChunk metadata
-during document ingestion, enabling the RAG pipeline to cite sources.
-"""
+"""Tests for Cloudflare-backed document ingestion."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from llama_index.core import Document as LIDocument
 
-from models.db import DocumentChunk, DocumentStatus
+from models.db import DocumentStatus
 
 
 @pytest.mark.asyncio
-async def test_source_filename_injected_into_document_chunks():
-    """GIVEN a Document with filename='intro_to_ai.pdf'
-    WHEN the ingestion pipeline indexes chunks into pgvector
-    THEN every stored DocumentChunk SHALL have source_filename='intro_to_ai.pdf'
-    in its metadata.
-    """
-    # ── Mock DB session returning a Document with known filename ──────
+async def test_ingest_uploads_to_cloudflare_with_source_filename():
     mock_doc = MagicMock()
     mock_doc.id = "doc-uuid-1"
     mock_doc.filename = "intro_to_ai.pdf"
@@ -35,33 +24,21 @@ async def test_source_filename_injected_into_document_chunks():
     mock_session.execute = AsyncMock(return_value=mock_result)
     mock_session.commit = AsyncMock()
 
-    # ── Capture DocumentChunk rows added by ingest_document ───────────
-    captured_chunks: list[DocumentChunk] = []
-    mock_session.add.side_effect = captured_chunks.append
+    uploaded: dict = {}
 
-    # ── Mock embed model returning one embedding per node ────────────
-    mock_embed = MagicMock()
-    mock_embed.get_text_embedding_batch.return_value = [[0.0] * 384]
-
-    # ── Mock reader to avoid filesystem access ────────────────────────
-    mock_reader = MagicMock()
-    mock_reader.load_data.return_value = [LIDocument(text="AI concepts")]
-    mock_reader_cls = MagicMock(return_value=mock_reader)
-
-    split_node = MagicMock()
-    split_node.metadata = {}
-    split_node.get_content.return_value = "AI concepts"
+    async def fake_upload(key, content, content_type, **kwargs):
+        uploaded["key"] = key
+        uploaded["content"] = content
+        uploaded["content_type"] = content_type
+        return {"status": "completed", "chunks_count": 4}
 
     with (
         patch("services.ingestion.AsyncSessionLocal", return_value=mock_session),
-        patch("services.ingestion.get_embed_model", return_value=mock_embed),
         patch("services.ingestion._validate_document", return_value=(True, "")),
-        patch("services.ingestion.SentenceSplitter") as mock_splitter_cls,
-        patch.dict("services.ingestion._FORMAT_READERS", {"pdf": mock_reader_cls}),
+        patch("services.ingestion.Path.read_bytes", return_value=b"%PDF-1.4 content"),
+        patch("core.cloudflare.upload_item", new=fake_upload),
     ):
-        mock_splitter_cls.return_value.get_nodes_from_documents.return_value = [split_node]
-
-        from services.ingestion import ingest_document  # noqa: PLC0415
+        from services.ingestion import ingest_document
 
         await ingest_document(
             document_id="doc-uuid-1",
@@ -70,14 +47,43 @@ async def test_source_filename_injected_into_document_chunks():
             file_format="pdf",
         )
 
-    assert len(captured_chunks) == 1
-    chunk = captured_chunks[0]
-    assert chunk.chunk_metadata["source_filename"] == "intro_to_ai.pdf"
-    assert chunk.professor_collection == "prof_test"
-    assert chunk.document_id == "doc-uuid-1"
-    # Document marked as ready
+    assert uploaded["key"] == "prof_test/doc-uuid-1/intro_to_ai.pdf"
+    assert uploaded["content_type"] == "application/pdf"
     assert mock_doc.status == DocumentStatus.ready
-    assert mock_doc.chunk_count == 1
+    assert mock_doc.chunk_count == 4
+
+
+@pytest.mark.asyncio
+async def test_ingest_empty_payload_is_rejected():
+    mock_doc = MagicMock()
+    mock_doc.id = "doc-empty-1"
+    mock_doc.filename = "empty.txt"
+    mock_result = MagicMock()
+    mock_result.scalar_one.return_value = mock_doc
+    mock_result.scalar_one_or_none.return_value = mock_doc
+    mock_session = MagicMock()
+    mock_session.__aenter__.return_value = mock_session
+    mock_session.execute = AsyncMock(return_value=mock_result)
+    mock_session.commit = AsyncMock()
+
+    with (
+        patch("services.ingestion.AsyncSessionLocal", return_value=mock_session),
+        patch("services.ingestion._validate_document", return_value=(True, "")),
+        patch("services.ingestion.Path.read_bytes", return_value=b"   "),
+        patch("core.cloudflare.upload_item", new=AsyncMock()) as upload,
+    ):
+        from services.ingestion import ingest_document
+
+        await ingest_document(
+            document_id="doc-empty-1",
+            professor_collection="prof_test",
+            file_path="/fake/empty.txt",
+            file_format="txt",
+        )
+
+    upload.assert_not_called()
+    assert mock_doc.status == DocumentStatus.error
+    assert "EMPTY_CHUNKS" in mock_doc.error_message
 
 
 @pytest.mark.asyncio

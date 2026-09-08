@@ -56,6 +56,16 @@ async def _probe_zai() -> dict:
     return {"status": "healthy"}
 
 
+async def _probe_cloudflare() -> dict:
+    """Check Cloudflare AI Search via GET instance."""
+    from core import cloudflare
+
+    if not cloudflare.is_configured():
+        raise RuntimeError("Cloudflare AI Search is not configured")
+    await cloudflare.get_instance()
+    return {"status": "healthy"}
+
+
 # ── Probe runner with timeout ────────────────────────────────────────────────
 
 
@@ -91,6 +101,7 @@ async def health():
         _run_probe("postgres", _probe_postgres()),
         _run_probe("redis", _probe_redis()),
         _run_probe("zai", _probe_zai()),
+        _run_probe("cloudflare", _probe_cloudflare()),
     )
     services = dict(raw)
     all_healthy = all(s["status"] == "healthy" for s in services.values())

@@ -1,14 +1,12 @@
 # Virtual Professor — Render Blueprint
 # Render hosts the frontend, API, and a small volatile Redis cache.
-# Supabase hosts the persistent PostgreSQL + pgvector database.
+# Supabase hosts the persistent PostgreSQL database.
+# Cloudflare AI Search hosts document chunking, embeddings, and retrieval.
 #
 # After the first sync:
-#   1. Set DATABASE_URL and ZAI_API_KEY in the Render dashboard
+#   1. Set DATABASE_URL, ZAI_API_KEY, and Cloudflare AI Search vars
 #   2. The frontend calls the API directly (NEXT_PUBLIC_API_URL is a build
 #      arg pointing at this API's https://*.onrender.com URL)
-#   3. On boot the API resizes document_chunks to VECTOR(384) if needed.
-#      Documents are vectorized on upload (not on boot) so FastEmbed does
-#      not OOM Render Free's 512MB at startup.
 
 services:
   - type: keyvalue
@@ -44,29 +42,14 @@ services:
         value: https://api.z.ai/api/paas/v4
       - key: ZAI_LLM_MODEL
         value: glm-4.7-flash
-      # ── Embeddings (local, no API) ──────────────────────────────────────
-      - key: EMBED_PROVIDER
-        value: fastembed
-      - key: EMBED_MODEL
-        value: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-      - key: EMBED_DIM
-        value: "384"
-      - key: FASTEMBED_CACHE_PATH
-        value: /app/.cache/fastembed
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: CLOUDFLARE_AI_SEARCH_INSTANCE
+        sync: false
       - key: EMBED_RESUME_ON_STARTUP
-        value: "false"
-      - key: OMP_NUM_THREADS
-        value: "1"
-      - key: MKL_NUM_THREADS
-        value: "1"
-      - key: OPENBLAS_NUM_THREADS
-        value: "1"
-      - key: ORT_INTRA_OP_NUM_THREADS
-        value: "1"
-      - key: MALLOC_ARENA_MAX
-        value: "2"
-      - key: TOKENIZERS_PARALLELISM
-        value: "false"
+        value: "true"
       - key: WEB_CONCURRENCY
         value: "1"
       - key: LLM_MAX_TOKENS
@@ -87,12 +70,10 @@ services:
         value: '["https://virtual-professor-frontend.onrender.com"]'
       - key: RAG_MIN_RELEVANCE_SCORE
         value: "0.20"
-      - key: RERANKER_TYPE
-        value: none
       - key: RAG_RETRIEVAL_TOP_K
-        value: "40"
-      - key: RERANKER_TOP_N
-        value: "6"
+        value: "8"
+      - key: UPLOAD_MAX_SIZE_MB
+        value: "4"
       - key: SESSION_MEMORY_MESSAGES
         value: "10"
       - key: SESSION_TIMEOUT_MINUTES

@@ -7,9 +7,7 @@ Verifies that:
 """
 
 from contextlib import asynccontextmanager
-import sys
 from pathlib import Path
-from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -33,6 +31,7 @@ class TestMainLifespan:
         mock_conn.run_sync = AsyncMock()
         mock_conn.execute = AsyncMock()
         mock_engine = MagicMock()
+        mock_engine.dialect.name = "sqlite"
 
         @asynccontextmanager
         async def mock_begin():
@@ -54,43 +53,35 @@ class TestMainLifespan:
         mock_flush.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_lifespan_wires_langfuse_callback_handler(self):
+    async def test_lifespan_does_not_require_llamaindex(self):
         """GIVEN Langfuse is enabled
         WHEN the FastAPI lifespan runs
-        THEN LangfuseCallbackHandler is attached to LlamaIndex callback_manager.
+        THEN startup succeeds without LlamaIndex callbacks.
         """
         import main
 
         mock_conn = MagicMock()
         mock_conn.run_sync = AsyncMock()
-        mock_conn.execute = AsyncMock()
         mock_engine = MagicMock()
+        mock_engine.dialect.name = "sqlite"
 
         @asynccontextmanager
         async def mock_begin():
             yield mock_conn
 
         mock_engine.begin.return_value = mock_begin()
-        mock_handler = MagicMock()
-        fake_langfuse_module = ModuleType("langfuse")
-        fake_callback_module = ModuleType("langfuse.callback")
-        fake_callback_module.LangfuseCallbackHandler = MagicMock(return_value=mock_handler)
-        fake_langfuse_module.callback = fake_callback_module
-        from llama_index.core import Settings as LlamaSettings
 
         with (
             patch("core.config.settings.langfuse_enable", True),
             patch.object(main, "engine", mock_engine),
-            patch.object(main.langfuse_service, "init_langfuse"),
+            patch.object(main.langfuse_service, "init_langfuse") as mock_init,
             patch.object(main.langfuse_service, "flush_langfuse", new=AsyncMock()),
-            patch.dict(sys.modules, {"langfuse": fake_langfuse_module, "langfuse.callback": fake_callback_module}),
-            patch.object(LlamaSettings.callback_manager, "add_handler") as mock_add_handler,
         ):
             async with main.lifespan(main.app):
                 pass
 
-        fake_callback_module.LangfuseCallbackHandler.assert_called_once()
-        mock_add_handler.assert_called_once_with(mock_handler)
+        mock_init.assert_called_once()
+        mock_conn.run_sync.assert_awaited_once()
 
 
 class TestDisabledMode:

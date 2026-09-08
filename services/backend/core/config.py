@@ -31,13 +31,16 @@ class Settings(BaseSettings):
     zai_base_url: str = "https://api.z.ai/api/paas/v4"
     zai_llm_model: str = "glm-4.7-flash"
     zai_fallback_llm_model: str = "glm-4.5-flash"
-    # Local FastEmbed model: no API key or metered provider is required.
-    embed_provider: str = "fastembed"
-    embed_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    embed_dim: int = 384  # must match the pgvector column size
-    # Loading FastEmbed on boot OOMs Render Free (512MB). Uploads still embed.
-    embed_resume_on_startup: bool = True
     llm_max_tokens: int = 350  # max tokens per LLM response (env: LLM_MAX_TOKENS)
+
+    # Cloudflare AI Search (managed RAG: chunking, embeddings, retrieval)
+    # Docs: https://developers.cloudflare.com/ai-search/
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
+    cloudflare_ai_search_instance: str = ""
+    cloudflare_timeout_seconds: float = 60.0
+    # Re-upload pending documents to Cloudflare on boot.
+    embed_resume_on_startup: bool = True
 
     # Edge-TTS — free neural TTS (Microsoft), no local model/service
     edge_tts_voice_en: str = "en-US-JennyNeural"
@@ -64,20 +67,12 @@ class Settings(BaseSettings):
     session_memory_max_tokens: int = 4096
     session_timeout_minutes: int = 30
 
-    # RAG
+    # RAG (Cloudflare AI Search)
     rag_min_relevance_score: float
+    rag_retrieval_top_k: int = 8  # env: RAG_RETRIEVAL_TOP_K (max 50)
 
-    # Reranker
-    reranker_type: str = "none"  # "bge" enables, "none" disables
-    reranker_model: str = "BAAI/bge-reranker-v2-m3"
-    reranker_top_n: int = 6  # chunks to keep after reranking
-    reranker_device: str = "cpu"
-
-    # Retrieval
-    rag_retrieval_top_k: int = 40  # env: RAG_RETRIEVAL_TOP_K (chunks to retrieve from pgvector)
-
-    # Upload validation
-    upload_max_size_mb: int = 50
+    # Upload validation — Cloudflare AI Search rejects files over 4 MB
+    upload_max_size_mb: int = 4
     upload_max_pages: int = 400
     upload_allowed_formats: str = "pdf,docx,pptx,txt,url"
 
@@ -160,6 +155,18 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "ZAI_API_KEY is empty or set to a placeholder. "
                 "Create a key at https://z.ai and set ZAI_API_KEY."
+            )
+
+        # ── Cloudflare AI Search ────────────────────────────────────────────
+        if not self.cloudflare_account_id or not self.cloudflare_api_token:
+            raise RuntimeError(
+                "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required. "
+                "Create a token with AI Search:Edit and AI Search:Run."
+            )
+        if not self.cloudflare_ai_search_instance:
+            raise RuntimeError(
+                "CLOUDFLARE_AI_SEARCH_INSTANCE is empty. "
+                "Create an AI Search instance in the Cloudflare dashboard."
             )
 
         # ── JWT secret key ──────────────────────────────────────────────────

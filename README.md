@@ -54,33 +54,27 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 │  │  /sessions/* │  │  /admin/*    │  │  Connector           │  │
 │  └──────┬───────┘  └──────┬───────┘  └──────────────────────┘  │
 │         │                 │                                     │
-│  ┌──────▼─────────────────▼──────────────────────────────────┐  │
-│  │               Orchestrator (Agent)                         │  │
-│  │   1. STT (browser) → 2. Scope Check → 3. RAG → 4. Reranker│  │
-│  │         → 5. LLM Prompt → 6. TTS (Edge-TTS)               │  │
-│  │                           ┌──────────────────────────┐     │  │
-│  │                           │  Langfuse Observability   │     │  │
-│  │                           │  (traces every step)      │     │  │
-│  │                           └──────────────────────────┘     │  │
-│  └──────┬───────────┬──────────────────┬──────────┬──────────┘  │
-└─────────┼───────────┼──────────────────┼──────────┼────────────┘
+    │  ┌──────▼─────────────────▼──────────────────────────────────┐  │
+    │  │               Orchestrator (Agent)                         │  │
+    │  │   1. STT (browser) → 2. Scope Check → 3. RAG → 4. LLM     │  │
+    │  │         → 5. TTS (Edge-TTS)                               │  │
+    │  │                           ┌──────────────────────────┐     │  │
+    │  │                           │  Langfuse Observability   │     │  │
+    │  │                           │  (traces every step)      │     │  │
+    │  │                           └──────────────────────────┘     │  │
+    │  └──────┬───────────┬──────────────────┬──────────┬──────────┘  │
+    └─────────┼───────────┼──────────────────┼──────────┼────────────┘
           │           │                  │          │
     ┌─────┴────┐ ┌─────▼──┐  ┌───────────▼──┐ ┌────▼───────────┐
-    │Browser   │ │  Z.AI  │  │  PostgreSQL  │ │  Edge-TTS     │
-    │SpeechRec │ │  GLM   │  │  (pgvector)  │ │  (Microsoft)  │
-    │ognition  │ │        │  │  Vector DB   │ │   TTS         │
-    └──────────┘ └────────┘  └──────┬───────┘ └────────────────┘
-                                   │
-                            ┌──────▼──────┐   ┌─────────┐
-                            │ BGE Reranker│   │  Redis  │
-                            │  (local)    │   │(sessions│
-                            └─────────────┘   │ cache)  │
-                                              └─────────┘
-                            ┌──────────────┐
-                            │  PostgreSQL  │
-                            │  (profiles,  │
-                            │   history)   │
-                            └──────────────┘
+    │Browser   │ │  Z.AI  │  │ Cloudflare   │ │  Edge-TTS     │
+    │SpeechRec │ │  GLM   │  │ AI Search    │ │  (Microsoft)  │
+    │ognition  │ │        │  │ (managed RAG)│ │   TTS         │
+    └──────────┘ └────────┘  └──────────────┘ └────────────────┘
+                            ┌──────────────┐   ┌─────────┐
+                            │  PostgreSQL  │   │  Redis  │
+                            │  (profiles,  │   │(sessions│
+                            │   history)   │   │ cache)  │
+                            └──────────────┘   └─────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
 │                     BROWSER (Admin)                             │
@@ -96,7 +90,7 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 |---|---|---|---|
 | `backend` | custom FastAPI | 8000 | Orchestrator, REST API, RAG, Edge-TTS, session management |
 | `frontend` | custom Next.js | 3000 | Student portal + Admin portal (dev compose only; Render in prod) |
-| `postgres` | `pgvector/pgvector:pg16` | 5432 | Relational data + pgvector embeddings |
+| `postgres` | `postgres:16-alpine` | 5432 | Relational data (professors, sessions, history) |
 | `redis` | `redis:7` | 6379 | Active session context cache |
 | `nginx` | `nginx` | 80/443 | Reverse proxy (dev compose only) |
 
@@ -117,17 +111,13 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 **Z.AI (GLM)**
 - Cloud LLM via the [Z.AI Open Platform](https://docs.z.ai/guides/llm/glm-5) (OpenAI-compatible chat completions)
 - Default model: `glm-4.7-flash` (free). Set `ZAI_LLM_MODEL=glm-5` to use GLM-5 (paid)
-- RAG embeddings run locally with FastEmbed and a multilingual MiniLM model; no embedding API key is required
 - Thinking mode is disabled for short spoken professor replies
 
-**FastEmbed (embeddings)**
-- Local `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384-dim) runs inside the backend
-- The model is downloaded once per deployed instance and is reused by ingestion and retrieval
-
-**pgvector (in PostgreSQL)**
-- One embedding row per document chunk, filtered by professor collection
-- Stores embeddings and metadata (source filename, page label)
-- Rows are deleted and re-inserted on re-index
+**Cloudflare AI Search (RAG)**
+- Documents are uploaded to a Cloudflare AI Search instance (built-in storage)
+- Cloudflare chunks, embeds, and indexes the file; retrieval is filtered by professor folder
+- Files must be **4 MB or smaller** (Cloudflare platform limit)
+- Chat generation stays on Z.AI; only retrieval uses Cloudflare
 
 **Edge-TTS**
 - Converts LLM response text to `audio/mpeg` bytes via Microsoft's free neural voices
@@ -153,7 +143,7 @@ name           VARCHAR     professor display name
 topic          VARCHAR     scope boundary (e.g., "Calculus", "World History")
 language       ENUM        es | en | both
 avatar_id      VARCHAR     LiveAvatar free avatar UUID
-collection     VARCHAR     per-professor pgvector filter key (uniq)
+collection     VARCHAR     per-professor Cloudflare folder prefix (uniq)
 system_prompt  TEXT        personality and tone instructions for the LLM
 created_at     TIMESTAMP
 ```
@@ -165,7 +155,7 @@ professor_id   UUID        FOREIGN KEY → professors.id
 filename       VARCHAR     original filename
 format         VARCHAR     pdf | docx | pptx | txt | url
 status         ENUM        pending | processing | ready | error
-chunk_count    INTEGER     number of chunks stored in pgvector
+chunk_count    INTEGER     number of chunks indexed in Cloudflare
 error_message  TEXT        populated if status = error
 uploaded_at    TIMESTAMP
 ```
@@ -199,19 +189,6 @@ sources_json   TEXT        JSON of RAG source citations
 timestamp      TIMESTAMP
 ```
 
-### document_chunks
-```
-id                  UUID        PRIMARY KEY
-document_id         UUID        FOREIGN KEY → documents.id
-professor_collection VARCHAR    filter key matching professors.collection
-chunk_index         INTEGER     order within the document
-text                TEXT        chunk content
-embedding           VECTOR(384) pgvector embedding (FastEmbed multilingual MiniLM)
-page_label          VARCHAR     optional page reference
-metadata            JSON        document_id, professor_collection, source_filename
-created_at          TIMESTAMP
-```
-
 ---
 
 ## Voice Interaction Flow
@@ -222,7 +199,7 @@ created_at          TIMESTAMP
 3.  Student speaks → browser transcribes with Web Speech API (SpeechRecognition)
 4.  Transcript (or typed fallback text) → POST /sessions/{id}/speak (JSON {"text": ...})
 5.  Redis: load last N messages (short-term memory / conversation context)
-6.  LlamaIndex: embed query → retrieve top-k chunks from pgvector (cosine distance, per professor)
+6.  Cloudflare AI Search: retrieve top-k chunks for that professor's folder
 7.  Scope check (LLM): is the query related to the professor's topic?
     ├── IN SCOPE  → build prompt (system_prompt + history + retrieved context + query)
     │              → Z.AI GLM generates response text
@@ -245,20 +222,14 @@ Admin uploads file → POST /admin/professors/{id}/documents
     ↓
 FastAPI BackgroundTask
     ↓
-Format-specific reader (llama-index)
-    ├── PDF  → PDFReader (+ PyMuPDF validation: encrypted / pages / scanned)
-    ├── DOCX → DocxReader
-    ├── PPTX → PptxReader
-    ├── TXT  → plain text fallback
-    └── URL  → SimpleWebPageReader(html_to_text=True)
+Validate PDF (PyMuPDF: encrypted / pages / scanned)
     ↓
-Text extraction + cleaning
+Upload to Cloudflare AI Search (key = {collection}/{document_id}/{filename})
+    ├── PDF / DOCX / TXT → uploaded as-is
+    ├── PPTX → slide text extracted, uploaded as .txt
+    └── URL → fetched HTML uploaded as .html
     ↓
-Chunking: 512 tokens, 50 token overlap, metadata tagging
-    ↓
-Embedding: FastEmbed multilingual MiniLM (local, provider-independent)
-    ↓
-Insert rows into document_chunks (pgvector) with source_filename metadata
+Cloudflare chunks, embeds, and indexes the file
     ↓
 Document status updated to "ready"
 ```
@@ -282,7 +253,7 @@ Document status updated to "ready"
 | `GET` | `/admin/professors/{id}/documents` | List professor's documents |
 | `GET` | `/admin/documents/{id}/chunks` | Paginated stored chunks for a document |
 | `GET` | `/admin/indexing/status` | Per-professor indexing statistics |
-| `DELETE` | `/admin/documents/{id}` | Remove document and its pgvector chunks |
+| `DELETE` | `/admin/documents/{id}` | Remove document and its Cloudflare index |
 | `GET` | `/admin/sessions` | List all sessions with usage stats |
 | `GET` | `/admin/sessions/{id}/history` | Full conversation of a session |
 
@@ -325,11 +296,9 @@ virtual-professor/
 │   │   ├── services/
 │   │   │   ├── tts.py                ← Edge-TTS client (audio/mpeg)
 │   │   │   ├── llm.py                ← Z.AI GLM client + prompt building
-│   │   │   ├── embeddings.py         ← local FastEmbed adapter
-│   │   │   ├── rag.py                ← LlamaIndex + pgvector retrieval
-│   │   │   ├── reranker.py           ← BGE cross-encoder reranker
+│   │   │   ├── rag.py                ← Cloudflare AI Search retrieval
 │   │   │   ├── memory.py             ← Redis session context manager
-│   │   │   ├── ingestion.py          ← document processing pipeline
+│   │   │   ├── ingestion.py          ← upload + index documents
 │   │   │   ├── liveavatar.py         ← LiveAvatar LITE connector
 │   │   │   └── langfuse.py           ← Langfuse observability helpers
 │   │   ├── models/
@@ -337,10 +306,11 @@ virtual-professor/
 │   │   │   └── schemas.py            ← Pydantic request/response schemas
 │   │   ├── core/
 │   │   │   ├── config.py             ← settings from environment variables
+│   │   │   ├── cloudflare.py         ← Cloudflare AI Search HTTP client
 │   │   │   └── database.py           ← DB session factory
 │   │   └── tests/
 │   │       ├── conftest.py           ← pytest fixtures + test client
-│   │       ├── test_rag.py           ← retrieval, reranker, context chunk tests
+│   │       ├── test_rag.py           ← retrieval and context chunk tests
 │   │       ├── test_llm.py           ← prompt building, [Source:] label tests
 │   │       ├── test_sessions.py      ← session lifecycle + speak endpoint
 │   │       └── test_validation.py    ← file upload validation tests
@@ -401,7 +371,7 @@ The stack is defined in [`docker-compose.yml`](./docker-compose.yml) at the repo
 | `nginx` | nginx:alpine | Reverse proxy (dev just for convenience) |
 | `frontend` | custom Node.js | Next.js app. Real prod hosting is Render (`Dockerfile.prod`) |
 | `backend` | custom Python | FastAPI orchestrator |
-| `postgres` | pgvector/pgvector:pg16 | Relational DB + pgvector embeddings |
+| `postgres` | postgres:16-alpine | Relational DB |
 | `redis` | redis:7-alpine | Session cache |
 
 Development overrides (hot-reload, debug ports) live in `docker-compose.override.yml` and are applied automatically when you run `docker compose up`.
@@ -415,7 +385,7 @@ Development overrides (hot-reload, debug ports) live in `docker-compose.override
 Copy `.env.example` to `.env` and fill in the values.
 
 ```env
-# PostgreSQL (pgvector)
+# PostgreSQL
 POSTGRES_USER=profesor
 POSTGRES_PASSWORD=changeme
 POSTGRES_DB=virtual_profesor
@@ -424,15 +394,15 @@ DATABASE_URL=postgresql://profesor:changeme@postgres:5432/virtual_profesor
 # Redis
 REDIS_URL=redis://redis:6379
 
-# Z.AI (GLM — chat LLM only; international API has no embedding models)
+# Z.AI (GLM — chat LLM only)
 ZAI_API_KEY=your-z-ai-api-key
 ZAI_BASE_URL=https://api.z.ai/api/paas/v4
 ZAI_LLM_MODEL=glm-4.7-flash
 
-# Embeddings (RAG). Local FastEmbed; no provider key is needed.
-EMBED_PROVIDER=fastembed
-EMBED_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-EMBED_DIM=384
+# Cloudflare AI Search (managed RAG)
+CLOUDFLARE_ACCOUNT_ID=your-account-id
+CLOUDFLARE_API_TOKEN=your-ai-search-token
+CLOUDFLARE_AI_SEARCH_INSTANCE=virtual-professor
 
 # Edge-TTS
 EDGE_TTS_VOICE_EN=en-US-JennyNeural
@@ -467,7 +437,7 @@ SESSION_TIMEOUT_MINUTES=30
 | 1 | LiveAvatar API key + sandbox | Pending | Register at liveavatar.com to get key and test LITE mode |
 | 2 | LLM model selection | Pending | Start with free `glm-4.7-flash` or paid `glm-5` |
 | 3 | Edge-TTS voice tuning | Done | ES/EN voices via `EDGE_TTS_VOICE_ES` / `EDGE_TTS_VOICE_EN` |
-| 4 | Embedding size lock | Done | pgvector column is fixed `VECTOR(384)` (multilingual MiniLM) |
+| 4 | Cloudflare AI Search | **In progress** | Create an instance and set `CLOUDFLARE_*` env vars. Files max 4 MB. |
 | 5 | Admin auth | **In progress** | See [plan 02](docs/plans/02-auth-backend.md) |
 | 6 | Student auth | **In progress** | See [plan 03](docs/plans/03-auth-frontend.md) |
 | 7 | RAG source citations in frontend | **In progress** | See [plan 04](docs/plans/04-rag-visible.md) |
@@ -497,6 +467,7 @@ cp .env.example .env
 
 Open `.env` and set at minimum:
 - `ZAI_API_KEY` — your key from [z.ai](https://z.ai)
+- `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_AI_SEARCH_INSTANCE`
 - `LIVEAVATAR_API_KEY` — your key from liveavatar.com
 - `POSTGRES_PASSWORD` — any secure password
 - `ADMIN_API_KEY` — any secret you'll use to call `/admin` endpoints
@@ -634,28 +605,32 @@ docker compose down -v
 ## Cloud deployment (Render only)
 
 Render hosts the frontend, API, and a volatile Redis cache. Supabase hosts the
-persistent PostgreSQL database with pgvector.
+persistent PostgreSQL database. Cloudflare AI Search hosts the RAG index.
 
 | Piece | Where | Config |
 |---|---|---|
 | Frontend | Render Blueprint | `virtual-professor-frontend` — Next.js standalone, health `/` |
 | API | Render Blueprint | `virtual-professor-api` — health `/health` |
-| Postgres (pgvector) | Supabase | Project database connection string |
+| Postgres | Supabase | Project database connection string |
 | Redis | Render Key Value | `virtual-professor-redis` (private) |
+| RAG | Cloudflare AI Search | Account ID, API token, instance name |
 
 The browser calls the Render API directly (`NEXT_PUBLIC_API_URL` is baked into the frontend at **build time** via a Docker build arg pointing at the API origin). Do **not** proxy `/speak` or document uploads through the frontend — keep them hitting the API origin directly.
 
 ### 1. Deploy the blueprint
 
-1. Create a Supabase project and enable the `vector` extension in SQL Editor.
+1. Create a Supabase project (plain PostgreSQL; the `vector` extension is no longer required).
 2. Copy its **Session pooler** connection string and convert it to
    `postgresql+asyncpg://` for `DATABASE_URL`.
-3. Push this branch to GitHub.
-4. In Render: **New → Blueprint** → select the repo. Render reads
+3. In Cloudflare: create an [AI Search](https://developers.cloudflare.com/ai-search/) instance
+   and an API token with **AI Search:Edit** and **AI Search:Run**.
+4. Push this branch to GitHub.
+5. In Render: **New → Blueprint** → select the repo. Render reads
    [`render.yaml`](./render.yaml).
-5. Set `DATABASE_URL`, `ZAI_API_KEY`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD`
-   in the API service environment.
-6. Wait until `virtual-professor-api` and
+6. Set `DATABASE_URL`, `ZAI_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`,
+   `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_AI_SEARCH_INSTANCE`, `ADMIN_EMAIL`,
+   and `ADMIN_PASSWORD` in the API service environment.
+7. Wait until `virtual-professor-api` and
    `virtual-professor-frontend` are Live.
    - API: `https://virtual-professor-api.onrender.com/health`
    - Frontend: `https://virtual-professor-frontend.onrender.com/`
@@ -664,28 +639,16 @@ The browser calls the Render API directly (`NEXT_PUBLIC_API_URL` is baked into t
 
 `render.yaml` pre-sets `CORS_ORIGINS=https://virtual-professor-frontend.onrender.com` on the API. If you rename the frontend service, update its `.onrender.com` origin and redeploy the API.
 
-### 3. Vectorize knowledge
+### 3. Index knowledge
 
-The API enables `pgvector` and creates tables on boot. If
-`document_chunks.embedding` is not `VECTOR(384)`, it truncates old vectors
-and resizes the column (Z.AI `embedding-3` used `VECTOR(1024)`, which
-rejects FastEmbed's 384-d vectors).
+Documents are uploaded to Cloudflare AI Search on admin upload. The API no
+longer loads FastEmbed, PyTorch, or a local reranker, so Render Free (512MB)
+can run the API without OOM on ingest.
 
-Documents are embedded **on upload**, not at startup. Render Free has
-**512MB RAM**; loading FastEmbed (~220MB) during boot would OOM-kill the
-API before `/health` passed. The production image also skips PyTorch and
-the BGE reranker for the same reason.
-
-If vectorization still dies after an upload (document stuck on `pending`
-or `error`), the instance ran out of memory. Upgrade
-`virtual-professor-api` from **Free (512MB)** to **Standard (2GB)** and
-re-upload the file.
-
-The FastEmbed model is baked into the API image, so the first upload does
-not wait on a Hugging Face download.
+Cloudflare rejects files larger than **4 MB**. Split large PDFs before upload.
 
 Render Free services have ephemeral filesystems, so uploaded source files are
-lost on restart. Indexed chunks remain in Supabase. If a document shows
+lost on restart. Indexed chunks remain in Cloudflare. If a document shows
 `SOURCE_MISSING`, re-upload it from the admin UI.
 
 Default model is free `glm-4.7-flash`. Paid GLM-5: set `ZAI_LLM_MODEL=glm-5` on the API service.
@@ -703,10 +666,9 @@ Default model is free `glm-4.7-flash`. Paid GLM-5: set `ZAI_LLM_MODEL=glm-5` on 
 | Avatar & WebRTC | LiveAvatar LITE |
 | Speech-to-Text | Browser Web Speech API (+ text fallback) |
 | LLM | Z.AI GLM (`glm-4.7-flash` free / `glm-5` paid) |
-| Embeddings | FastEmbed multilingual MiniLM (local, 384 dims) |
-| RAG Framework | LlamaIndex |
-| Vector Database | PostgreSQL + pgvector |
-| Reranker | BGE cross-encoder (local) |
+| Embeddings | Cloudflare AI Search |
+| RAG | Cloudflare AI Search (Items + Search APIs) |
+| Vector Database | Cloudflare (managed) |
 | Text-to-Speech | Edge-TTS (Microsoft neural voices) |
 | Backend | FastAPI (Python) |
 | Frontend | Next.js (TypeScript) |

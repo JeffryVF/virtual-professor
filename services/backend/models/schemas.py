@@ -145,7 +145,7 @@ class MessageResponse(BaseModel):
 # ── Chunks ────────────────────────────────────────────────────────────────────
 
 class ChunkDetail(BaseModel):
-    """A single chunk from a document stored in pgvector."""
+    """A single chunk returned from Cloudflare AI Search."""
 
     chunk_index: int
     text: str

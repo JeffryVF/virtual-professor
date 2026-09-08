@@ -55,19 +55,13 @@ async def lifespan(app: FastAPI):
 
     if os.environ.get("RENDER"):
         log.warning(
-            "Render Free is 512MB RAM. FastEmbed is loaded lazily on first "
-            "document upload; keep RERANKER_TYPE=none. If vectorization still "
-            "dies, upgrade the API to Render Standard (2GB)."
+            "Render Free is 512MB RAM. RAG indexing runs on Cloudflare AI Search, "
+            "so the API no longer loads local embedding or reranker models."
         )
 
-    # ── Create tables and align pgvector embeddings ─────────────────────────
-    from core.vector_schema import ensure_embedding_dimension, ensure_vector_extension
-
+    # ── Create tables ─────────────────────────────────────────────────────────
     async with engine.begin() as conn:
-        # pgvector must exist before the document_chunks table is created
-        await ensure_vector_extension(conn)
         await conn.run_sync(Base.metadata.create_all)
-        await ensure_embedding_dimension(conn, settings.embed_dim)
 
     # ── Seed default admin user ─────────────────────────────────────────────
     from core.database import AsyncSessionLocal
@@ -76,8 +70,7 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as session:
         await seed_default_admin(session)
 
-    # Re-embed leftover documents only when there is RAM to load FastEmbed.
-    # On Render Free this is off: loading the model at boot OOMs the instance.
+    # Re-index leftover documents in Cloudflare if credentials are present.
     if engine.dialect.name != "sqlite" and settings.embed_resume_on_startup:
         from services.ingestion import resume_incomplete_ingestion
 
@@ -85,16 +78,6 @@ async def lifespan(app: FastAPI):
 
     # ── Langfuse init ───────────────────────────────────────────────────────
     langfuse_service.init_langfuse()
-    if settings.langfuse_enable:
-        try:
-            from langfuse.callback import LangfuseCallbackHandler
-            from llama_index.core import Settings
-
-            callback_handler = LangfuseCallbackHandler()
-            Settings.callback_manager.add_handler(callback_handler)
-            log.info("LangfuseCallbackHandler wired to LlamaIndex Settings")
-        except Exception as exc:
-            log.warning("Failed to wire LangfuseCallbackHandler: %s", exc)
 
     yield
 

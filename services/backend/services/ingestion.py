@@ -1,31 +1,30 @@
-import asyncio
+"""Upload professor documents to Cloudflare AI Search for indexing."""
+
+from __future__ import annotations
+
 import logging
 import os
+import zipfile
+from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import fitz
-from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.readers.base import BaseReader
-from llama_index.readers.file import (
-    DocxReader,
-    PDFReader,
-    PptxReader,
-)
-from sqlalchemy import delete, or_, select
+import httpx
 
+from core import cloudflare
 from core.config import settings
 from core.database import AsyncSessionLocal
-from models.db import Document, DocumentChunk, DocumentStatus, Professor
-from services.embeddings import get_embed_model
+from models.db import Document, DocumentStatus, Professor
+from sqlalchemy import select
 
 log = logging.getLogger(__name__)
 
-CHUNK_SIZE = 512
-CHUNK_OVERLAP = 50
-
-_FORMAT_READERS: dict[str, type[BaseReader]] = {
-    "pdf": PDFReader,
-    "docx": DocxReader,
-    "pptx": PptxReader,
+_CONTENT_TYPES = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "txt": "text/plain",
+    "html": "text/html",
+    "md": "text/markdown",
 }
 
 
@@ -63,7 +62,6 @@ def _validate_document(file_path: str, file_format: str, max_pages: int) -> tupl
 
             return (False, "PDF_NO_EXTRACTABLE_TEXT: PDF contains no extractable text (possible scanned document)")
 
-    # Non-PDF formats skip pre-ingestion PDF validation
     return (True, "")
 
 
@@ -73,12 +71,61 @@ def document_source_path(
     file_format: str,
     upload_dir: str | None = None,
 ) -> str:
-    """On-disk path used at upload time and when resuming vectorization."""
+    """On-disk path used at upload time and when resuming indexing."""
     return os.path.join(
         upload_dir or settings.upload_dir,
         str(professor_id),
         f"{document_id}.{file_format}",
     )
+
+
+def _pptx_to_text(file_path: str) -> str:
+    """Extract slide text from a PPTX without Office/LlamaIndex readers."""
+    texts: list[str] = []
+    with zipfile.ZipFile(file_path) as archive:
+        names = sorted(
+            name
+            for name in archive.namelist()
+            if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+        )
+        for name in names:
+            root = ET.fromstring(archive.read(name))
+            for node in root.iter():
+                if node.tag.endswith("}t") and node.text:
+                    texts.append(node.text)
+    return "\n".join(texts)
+
+
+async def _payload_for_upload(
+    file_path: str,
+    file_format: str,
+    filename: str,
+    collection: str,
+    document_id: str,
+) -> tuple[str, bytes, str]:
+    """Return (item_key, bytes, content_type) ready for Cloudflare."""
+    if file_format == "url":
+        url = Path(file_path).read_text().strip()
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            body = response.content
+            content_type = response.headers.get("content-type", "text/html").split(";")[0]
+        upload_name = filename if filename.endswith((".html", ".htm", ".txt", ".md")) else f"{Path(filename).stem}.html"
+        if "html" not in content_type and not content_type.startswith("text/"):
+            content_type = "text/html"
+        return cloudflare.item_key(collection, document_id, upload_name), body, content_type
+
+    if file_format == "pptx":
+        text = _pptx_to_text(file_path)
+        if not text.strip():
+            raise ValueError("EMPTY_CHUNKS: Document produced no usable text content")
+        key = cloudflare.item_key(collection, document_id, f"{Path(filename).stem}.txt")
+        return key, text.encode("utf-8"), "text/plain"
+
+    content = Path(file_path).read_bytes()
+    content_type = _CONTENT_TYPES.get(file_format, "application/octet-stream")
+    return cloudflare.item_key(collection, document_id, filename), content, content_type
 
 
 async def ingest_document(
@@ -87,7 +134,7 @@ async def ingest_document(
     file_path: str,
     file_format: str,
 ) -> None:
-    """Background task: parse, chunk, embed and store a document in pgvector."""
+    """Background task: validate and index a document in Cloudflare AI Search."""
     async with AsyncSessionLocal() as db:
         try:
             result = await db.execute(select(Document).where(Document.id == document_id))
@@ -104,7 +151,6 @@ async def ingest_document(
                 file_format,
             )
 
-            # Pre-ingestion validation
             is_valid, error_msg = _validate_document(
                 file_path,
                 file_format,
@@ -117,71 +163,37 @@ async def ingest_document(
                 log.warning("Document validation failed: document_id=%s error=%s", document_id, error_msg)
                 return
 
-            embed_model = await asyncio.to_thread(get_embed_model)
-
-            # Load and parse document
-            if file_format == "url":
-                from pathlib import Path
-                from llama_index.readers.web import SimpleWebPageReader
-                url = Path(file_path).read_text().strip()
-                documents = SimpleWebPageReader(html_to_text=True).load_data([url])
-            elif file_format in _FORMAT_READERS:
-                reader = _FORMAT_READERS[file_format]()
-                documents = reader.load_data(file=file_path)
-            else:
-                # Fallback: read as plain text
-                from llama_index.core import SimpleDirectoryReader
-                documents = SimpleDirectoryReader(input_files=[file_path]).load_data()
-
-            # Chunk
-            splitter = SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-            nodes = splitter.get_nodes_from_documents(documents)
-
-            # Post-parse validation: ensure at least one non-empty node
-            if not nodes or all(not node.get_content().strip() for node in nodes):
+            key, content, content_type = await _payload_for_upload(
+                file_path,
+                file_format,
+                doc.filename,
+                professor_collection,
+                document_id,
+            )
+            if not content.strip():
                 doc.status = DocumentStatus.error
                 doc.error_message = "EMPTY_CHUNKS: Document produced no usable text content after chunking"
                 await db.commit()
-                log.warning("Document produced no chunks: document_id=%s", document_id)
+                log.warning("Document produced no content: document_id=%s", document_id)
                 return
 
-            # Embed all chunks in a single batch
-            contents = [node.get_content() for node in nodes]
-            embeddings = await asyncio.to_thread(
-                embed_model.get_text_embedding_batch, contents
-            )
+            item = await cloudflare.upload_item(key, content, content_type)
+            status = str(item.get("status") or "completed").lower()
+            if status == "error":
+                doc.status = DocumentStatus.error
+                doc.error_message = str(item.get("error") or item.get("message") or "Cloudflare indexing failed")
+                await db.commit()
+                return
 
-            # Replace any previous chunks for this document, then insert fresh rows
-            await db.execute(
-                delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
-            )
-            for idx, (node, embedding) in enumerate(zip(nodes, embeddings)):
-                db.add(
-                    DocumentChunk(
-                        document_id=document_id,
-                        professor_collection=professor_collection,
-                        chunk_index=idx,
-                        text=node.get_content(),
-                        embedding=embedding,
-                        page_label=node.metadata.get("page_label"),
-                        chunk_metadata={
-                            "document_id": document_id,
-                            "professor_collection": professor_collection,
-                            "source_filename": doc.filename,
-                        },
-                    )
-                )
-
-            # Mark document as ready
             doc.status = DocumentStatus.ready
-            doc.chunk_count = len(nodes)
+            doc.chunk_count = int(item.get("chunks_count") or item.get("chunk_count") or 0)
             await db.commit()
             log.warning(
-                "Document ingestion completed: document_id=%s chunks=%s",
+                "Document ingestion completed: document_id=%s chunks=%s key=%s",
                 document_id,
-                len(nodes),
+                doc.chunk_count,
+                key,
             )
-
         except Exception as exc:
             log.exception("Document ingestion failed: document_id=%s", document_id)
             result = await db.execute(select(Document).where(Document.id == document_id))
@@ -194,33 +206,23 @@ async def ingest_document(
 
 
 async def resume_incomplete_ingestion() -> None:
-    """Embed documents that never landed in pgvector, if the source file still exists.
-
-    Covers leftover Qdrant-era rows (``ready`` with no ``document_chunks``),
-    crashed uploads (``pending``/``processing``), and a VECTOR(1024)→384 resize
-    that truncated old embeddings.
-    """
-    chunked = select(DocumentChunk.document_id).distinct()
+    """Re-index documents that never finished uploading to Cloudflare."""
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Document, Professor)
             .join(Professor, Document.professor_id == Professor.id)
             .where(
-                or_(
-                    Document.status.in_(
-                        (DocumentStatus.pending, DocumentStatus.processing)
-                    ),
-                    Document.id.not_in(chunked),
+                Document.status.in_(
+                    (DocumentStatus.pending, DocumentStatus.processing)
                 )
             )
-            .where(Document.status != DocumentStatus.error)
         )
         jobs = list(result.all())
 
     if not jobs:
         return
 
-    log.warning("Vectorizing %s document(s) missing pgvector embeddings", len(jobs))
+    log.warning("Re-indexing %s document(s) in Cloudflare AI Search", len(jobs))
     for doc, prof in jobs:
         save_path = document_source_path(doc.professor_id, doc.id, doc.format)
         if not os.path.isfile(save_path):
@@ -230,41 +232,42 @@ async def resume_incomplete_ingestion() -> None:
                     continue
                 fresh.status = DocumentStatus.error
                 fresh.error_message = (
-                    "SOURCE_MISSING: uploaded file is gone. Re-upload the document to vectorize it."
+                    "SOURCE_MISSING: uploaded file is gone. Re-upload the document to index it."
                 )
                 await db.commit()
             continue
         try:
             await ingest_document(str(doc.id), prof.collection, save_path, doc.format)
         except Exception:
-            log.exception("Failed to vectorize document %s on startup", doc.id)
+            log.exception("Failed to index document %s on startup", doc.id)
+
+
+async def delete_professor_index(collection_name: str) -> None:
+    """Delete every Cloudflare item stored under a professor collection prefix."""
+    if not cloudflare.is_configured():
+        return
+    items = await cloudflare.list_items()
+    prefix = f"{collection_name}/"
+    for item in items:
+        key = str(item.get("key") or "")
+        item_id = str(item.get("id") or "")
+        if key.startswith(prefix) and item_id:
+            await cloudflare.delete_item(item_id)
 
 
 async def delete_qdrant_collection(collection_name: str) -> None:
-    """Delete every stored chunk for a professor collection (used when removing a professor).
-
-    Kept under a legacy name for call-site compatibility; there is no Qdrant anymore.
-    """
-    async with AsyncSessionLocal() as db:
-        prof_result = await db.execute(
-            select(Professor).where(Professor.collection == collection_name)
-        )
-        prof = prof_result.scalar_one_or_none()
-        if prof is not None:
-            doc_result = await db.execute(
-                select(Document.id).where(Document.professor_id == prof.id)
-            )
-            for (doc_id,) in doc_result.all():
-                await db.execute(
-                    delete(DocumentChunk).where(DocumentChunk.document_id == doc_id)
-                )
-        await db.commit()
+    """Legacy alias used by admin professor deletion."""
+    await delete_professor_index(collection_name)
 
 
 async def delete_document_chunks(professor_collection: str, document_id: str) -> None:
-    """Remove all stored chunks that belong to a specific document."""
-    async with AsyncSessionLocal() as db:
-        await db.execute(
-            delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
-        )
-        await db.commit()
+    """Remove the Cloudflare item(s) that belong to a specific document."""
+    if not cloudflare.is_configured():
+        return
+    items = await cloudflare.list_items()
+    prefix = f"{professor_collection}/{document_id}/"
+    for item in items:
+        key = str(item.get("key") or "")
+        item_id = str(item.get("id") or "")
+        if key.startswith(prefix) and item_id:
+            await cloudflare.delete_item(item_id)

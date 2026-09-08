@@ -148,21 +148,21 @@ class TestValidateDocument:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Post-parse validation — empty chunks in ingest_document()
+# Empty payload rejection in ingest_document()
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestPostParseValidation:
-    """Tests for post-parse empty-chunk rejection in ingest_document()."""
+    """Tests for empty-payload rejection before Cloudflare upload."""
 
     @pytest.mark.asyncio
     async def test_zero_nodes_rejected(self):
-        """GIVEN a document that produces zero nodes after chunking
+        """GIVEN an empty file
         WHEN ingest_document runs
         THEN doc.status=error, doc.error_message contains EMPTY_CHUNKS.
         """
         mock_doc = MagicMock()
         mock_doc.id = "doc-empty-1"
-        mock_doc.filename = "empty.pdf"
+        mock_doc.filename = "empty.txt"
 
         mock_result = MagicMock()
         mock_result.scalar_one.return_value = mock_doc
@@ -172,45 +172,36 @@ class TestPostParseValidation:
         mock_session.__aenter__.return_value = mock_session
         mock_session.execute.return_value = mock_result
 
-        mock_reader = MagicMock()
-        mock_reader.load_data.return_value = []
-        mock_reader_cls = MagicMock(return_value=mock_reader)
-
-        # Zero nodes returned from splitter
-        splitter_results: list = []
-
         from models.db import DocumentStatus
 
         with (
             patch("services.ingestion.AsyncSessionLocal", return_value=mock_session),
-            patch("services.ingestion.get_embed_model"),
             patch("services.ingestion._validate_document", return_value=(True, "")),
-            patch("services.ingestion.SentenceSplitter.get_nodes_from_documents") as mock_splitter,
-            patch.dict("services.ingestion._FORMAT_READERS", {"pdf": mock_reader_cls}),
+            patch("services.ingestion.Path.read_bytes", return_value=b""),
+            patch("core.cloudflare.upload_item", new=AsyncMock()) as upload,
         ):
-            mock_splitter.return_value = splitter_results
-
             from services.ingestion import ingest_document
 
             await ingest_document(
                 document_id="doc-empty-1",
                 professor_collection="prof_test",
-                file_path="/fake/empty.pdf",
-                file_format="pdf",
+                file_path="/fake/empty.txt",
+                file_format="txt",
             )
 
+        upload.assert_not_called()
         assert mock_doc.status == DocumentStatus.error
         assert "EMPTY_CHUNKS" in mock_doc.error_message
 
     @pytest.mark.asyncio
     async def test_empty_text_nodes_rejected(self):
-        """GIVEN a document whose nodes have only whitespace/empty content
+        """GIVEN a document whose payload is only whitespace
         WHEN ingest_document runs
         THEN doc.status=error, doc.error_message contains EMPTY_CHUNKS.
         """
         mock_doc = MagicMock()
         mock_doc.id = "doc-empty-2"
-        mock_doc.filename = "blank.pdf"
+        mock_doc.filename = "blank.txt"
 
         mock_result = MagicMock()
         mock_result.scalar_one.return_value = mock_doc
@@ -220,53 +211,35 @@ class TestPostParseValidation:
         mock_session.__aenter__.return_value = mock_session
         mock_session.execute.return_value = mock_result
 
-        mock_reader = MagicMock()
-        mock_reader.load_data.return_value = []
-        mock_reader_cls = MagicMock(return_value=mock_reader)
-
-        # Nodes with only whitespace content
-        empty_node = MagicMock()
-        empty_node.get_content.return_value = "   \n  \t  "
-
         from models.db import DocumentStatus
 
         with (
             patch("services.ingestion.AsyncSessionLocal", return_value=mock_session),
-            patch("services.ingestion.get_embed_model"),
             patch("services.ingestion._validate_document", return_value=(True, "")),
-            patch("services.ingestion.SentenceSplitter.get_nodes_from_documents") as mock_splitter,
-            patch.dict("services.ingestion._FORMAT_READERS", {"pdf": mock_reader_cls}),
+            patch("services.ingestion.Path.read_bytes", return_value=b"   \n  \t  "),
+            patch("core.cloudflare.upload_item", new=AsyncMock()) as upload,
         ):
-            mock_splitter.return_value = [empty_node]
-
             from services.ingestion import ingest_document
 
             await ingest_document(
                 document_id="doc-empty-2",
                 professor_collection="prof_test",
-                file_path="/fake/blank.pdf",
-                file_format="pdf",
+                file_path="/fake/blank.txt",
+                file_format="txt",
             )
 
+        upload.assert_not_called()
         assert mock_doc.status == DocumentStatus.error
         assert "EMPTY_CHUNKS" in mock_doc.error_message
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Bug Fix: docx uses DocxReader, not PDFReader (Phase 5)
-# ═══════════════════════════════════════════════════════════════════════════════
+def test_docx_uses_office_content_type():
+    """DOCX files are uploaded to Cloudflare as Office Open XML, not PDF."""
+    from services.ingestion import _CONTENT_TYPES
 
-def test_docx_uses_docx_reader():
-    """GIVEN _FORMAT_READERS
-    WHEN looking up the "docx" key
-    THEN the reader type MUST be DocxReader (not PDFReader).
-    """
-    from services.ingestion import _FORMAT_READERS, DocxReader, PDFReader
-
-    docx_reader = _FORMAT_READERS.get("docx")
-    assert docx_reader is not None, "docx must have a reader assigned"
-    assert docx_reader is DocxReader, f"Expected DocxReader, got {docx_reader}"
-    assert docx_reader is not PDFReader, "docx must NOT use PDFReader"
+    assert _CONTENT_TYPES["docx"].startswith("application/vnd.openxmlformats")
+    assert _CONTENT_TYPES["pdf"] == "application/pdf"
+    assert _CONTENT_TYPES["docx"] != _CONTENT_TYPES["pdf"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

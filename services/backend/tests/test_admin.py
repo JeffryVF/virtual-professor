@@ -1,38 +1,34 @@
 """Integration tests for admin endpoints: document chunks, indexing status, and reindex."""
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
 from uuid import UUID
 
-from core.config import settings
-from models.db import Document, DocumentChunk, DocumentStatus, Language, Professor
+from models.db import Document, DocumentStatus, Language, Professor
+from services.rag import ScoredChunk
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
 @pytest_asyncio.fixture
-async def ready_doc_chunks(db_session, test_professor, test_document_ready):
-    """Insert ``n`` chunks pointing at the ready document (pgvector rows)."""
-    async def _add(n: int, text_factory=lambda i: f"Chunk {i} content here"):
-        chunks = []
-        for i in range(n):
-            chunks.append(
-                DocumentChunk(
-                    document_id=test_document_ready.id,
-                    professor_collection=test_professor.collection,
-                    chunk_index=i,
-                    text=text_factory(i),
-                    page_label=str(i + 1),
-                    embedding=[0.0] * settings.embed_dim,
-                )
+async def ready_doc_chunks(test_document_ready):
+    """Return Cloudflare chunks as if they were already indexed."""
+
+    def _add(n: int, text_factory=lambda i: f"Chunk {i} content here"):
+        return [
+            ScoredChunk(
+                text=text_factory(i),
+                score=None,
+                source_filename=test_document_ready.filename,
+                document_id=str(test_document_ready.id),
+                page_label=str(i + 1),
             )
-        db_session.add_all(chunks)
-        await db_session.commit()
-        return chunks
+            for i in range(n)
+        ]
 
     return _add
 
@@ -183,16 +179,17 @@ class TestGetDocumentChunks:
     async def test_chunks_with_points(
         self, async_client, admin_token, test_document_ready, ready_doc_chunks
     ):
-        """GIVEN a ready document with stored pgvector chunks
+        """GIVEN a ready document with indexed Cloudflare chunks
         WHEN GET /admin/documents/{document_id}/chunks
         THEN returns paginated chunks with correct fields.
         """
-        await ready_doc_chunks(3)
+        chunks = ready_doc_chunks(3)
 
-        response = await async_client.get(
-            f"/admin/documents/{test_document_ready.id}/chunks",
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
+        with patch("routers.admin.list_document_chunks", new=AsyncMock(return_value=chunks)):
+            response = await async_client.get(
+                f"/admin/documents/{test_document_ready.id}/chunks",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
 
         assert response.status_code == 200
         body = response.json()
@@ -212,12 +209,13 @@ class TestGetDocumentChunks:
         WHEN text exceeds 500 characters
         THEN text SHALL be truncated to 500 chars.
         """
-        await ready_doc_chunks(1, text_factory=lambda i: "A" * 1000)
+        chunks = ready_doc_chunks(1, text_factory=lambda i: "A" * 1000)
 
-        response = await async_client.get(
-            f"/admin/documents/{test_document_ready.id}/chunks",
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
+        with patch("routers.admin.list_document_chunks", new=AsyncMock(return_value=chunks)):
+            response = await async_client.get(
+                f"/admin/documents/{test_document_ready.id}/chunks",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
 
         assert response.status_code == 200
         chunk = response.json()["chunks"][0]
@@ -231,13 +229,14 @@ class TestGetDocumentChunks:
         WHEN text exceeds 500 characters
         THEN text SHALL NOT be truncated.
         """
-        await ready_doc_chunks(1, text_factory=lambda i: "A" * 1000)
+        chunks = ready_doc_chunks(1, text_factory=lambda i: "A" * 1000)
 
-        response = await async_client.get(
-            f"/admin/documents/{test_document_ready.id}/chunks",
-            params={"full": "true"},
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
+        with patch("routers.admin.list_document_chunks", new=AsyncMock(return_value=chunks)):
+            response = await async_client.get(
+                f"/admin/documents/{test_document_ready.id}/chunks",
+                params={"full": "true"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
 
         assert response.status_code == 200
         chunk = response.json()["chunks"][0]
@@ -251,13 +250,17 @@ class TestGetDocumentChunks:
         WHEN GET /admin/documents/{document_id}/chunks
         THEN returns 2 chunks starting from index 1.
         """
-        await ready_doc_chunks(4)
+        chunks = ready_doc_chunks(4)
 
-        response = await async_client.get(
-            f"/admin/documents/{test_document_ready.id}/chunks",
-            params={"offset": "1", "limit": "2"},
-            headers={"Authorization": f"Bearer {admin_token}"},
-        )
+        async def fake_list(_collection, _document_id, _filename, offset=0, limit=50):
+            return chunks[offset : offset + limit]
+
+        with patch("routers.admin.list_document_chunks", new=fake_list):
+            response = await async_client.get(
+                f"/admin/documents/{test_document_ready.id}/chunks",
+                params={"offset": "1", "limit": "2"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
 
         assert response.status_code == 200
         body = response.json()
@@ -338,14 +341,11 @@ class TestGetIndexingStatus:
     async def test_indexing_status_with_docs(
         self, async_client, admin_token, test_professor,
         test_document_ready, test_document_pending, test_document_error,
-        ready_doc_chunks,
     ):
         """GIVEN a professor with documents in various states
         WHEN GET /admin/indexing/status
         THEN returns correct counts and status breakdown.
         """
-        await ready_doc_chunks(3)
-
         response = await async_client.get(
             "/admin/indexing/status",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -361,7 +361,7 @@ class TestGetIndexingStatus:
         assert col["documents_by_status"]["pending"] == 1
         assert col["documents_by_status"]["error"] == 1
         assert col["total_chunks"] == 5  # only ready doc has chunk_count=5
-        assert col["stored_chunks"] == 3  # rows actually in pgvector for this collection
+        assert col["stored_chunks"] == 5  # ready documents indexed in Cloudflare
         assert col["last_indexed_at"] is not None  # ready doc has uploaded_at
         assert col["last_error"] == "Something went wrong"
 
@@ -373,12 +373,15 @@ class TestGetIndexingStatus:
 
     @pytest.mark.asyncio
     async def test_indexing_status_stored_chunks_empty(
-        self, async_client, admin_token, test_professor, test_document_ready
+        self, async_client, admin_token, test_professor, test_document_ready, db_session
     ):
-        """GIVEN a professor whose collection has no stored chunks yet
+        """GIVEN a ready document whose Cloudflare index has no chunks yet
         WHEN GET /admin/indexing/status
         THEN stored_chunks SHALL be 0 (no error).
         """
+        test_document_ready.chunk_count = 0
+        await db_session.commit()
+
         response = await async_client.get(
             "/admin/indexing/status",
             headers={"Authorization": f"Bearer {admin_token}"},

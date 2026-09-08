@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.database import get_db
 from dependencies.auth import require_admin, verify_admin_or_deprecated_key
-from models.db import Document, DocumentChunk, DocumentStatus, Message, Professor
+from models.db import Document, DocumentStatus, Message, Professor
 from models.db import Session as DBSession
 from models.schemas import (
     ChunkDetail,
@@ -34,6 +34,7 @@ from services.ingestion import (
     document_source_path,
     ingest_document,
 )
+from services.rag import list_document_chunks
 
 
 log = logging.getLogger(__name__)
@@ -304,7 +305,7 @@ async def get_document_chunks(
     db: AsyncSession = Depends(get_db),
     _=Depends(verify_admin_or_deprecated_key),
 ):
-    """Return paginated chunks for a specific document from pgvector."""
+    """Return paginated chunks for a specific document from Cloudflare AI Search."""
     result = await db.execute(select(Document).where(Document.id == document_id))
     doc = result.scalar_one_or_none()
     if not doc:
@@ -316,28 +317,29 @@ async def get_document_chunks(
             detail=f"Document status is '{doc.status.value}', expected 'ready'",
         )
 
-    count_result = await db.execute(
-        select(func.count(DocumentChunk.id)).where(DocumentChunk.document_id == document_id)
+    prof_result = await db.execute(select(Professor).where(Professor.id == doc.professor_id))
+    prof = prof_result.scalar_one()
+    scored = await list_document_chunks(
+        prof.collection,
+        str(document_id),
+        doc.filename,
+        offset=offset,
+        limit=limit,
     )
-    total = count_result.scalar() or 0
-
-    chunk_result = await db.execute(
-        select(DocumentChunk.text, DocumentChunk.page_label, DocumentChunk.chunk_index)
-        .where(DocumentChunk.document_id == document_id)
-        .order_by(DocumentChunk.chunk_index)
-        .offset(offset)
-        .limit(limit)
-    )
+    if offset == 0:
+        total = len(scored)
+    else:
+        total = doc.chunk_count or (offset + len(scored))
 
     chunks: list[ChunkDetail] = []
-    for text_content, page_label, chunk_index in chunk_result.all():
-        display_text = text_content[:500] if not full else text_content
+    for idx, chunk in enumerate(scored, start=offset):
+        display_text = chunk.text[:500] if not full else chunk.text
         chunks.append(
             ChunkDetail(
-                chunk_index=chunk_index,
+                chunk_index=idx,
                 text=display_text,
-                score=None,
-                page_number=page_label,
+                score=chunk.score,
+                page_number=chunk.page_label,
             )
         )
 
@@ -465,13 +467,17 @@ async def get_indexing_status(
         )
         last_error = last_error_result.scalar_one_or_none()
 
-        # Stored chunk count (rows actually in pgvector for this collection)
-        stored_chunks_result = await db.execute(
-            select(func.count(DocumentChunk.id)).where(
-                DocumentChunk.professor_collection == prof.collection
-            )
+        stored_chunks = int(
+            (
+                await db.execute(
+                    select(func.coalesce(func.sum(Document.chunk_count), 0)).where(
+                        Document.professor_id == prof.id,
+                        Document.status == DocumentStatus.ready,
+                    )
+                )
+            ).scalar()
+            or 0
         )
-        stored_chunks = stored_chunks_result.scalar() or 0
 
         collection_statuses.append(
             CollectionStatus(
