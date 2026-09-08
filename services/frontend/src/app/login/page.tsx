@@ -35,7 +35,10 @@ function LoginForm() {
   // If there are no professors, redirect students to the student portal,
   // not the admin panel (which requires admin role).
   const redirectTo = isNoProfessors ? '/' : (searchParams.get('redirect') || '/')
-  const destinationFor = (role: string) => role === 'admin' ? '/admin' : redirectTo
+  const destinationFor = (role: string) => {
+    if (role === 'admin') return '/admin'
+    return redirectTo.startsWith('/admin') ? '/' : redirectTo
+  }
 
   // Switch to register tab when redirected because no professors exist
   useEffect(() => {
