@@ -87,9 +87,8 @@ services:
     dockerfilePath: ./services/frontend/Dockerfile.prod
     dockerContext: ./services/frontend
     healthCheckPath: /
-    buildArgs:
-      - key: NEXT_PUBLIC_API_URL
-        value: https://virtual-professor-api.onrender.com
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NEXT_PUBLIC_API_URL
+        value: https://virtual-professor-api.onrender.com
