@@ -21,9 +21,10 @@ target_metadata = Base.metadata
 # ── Database URL ──────────────────────────────────────────────────────────────
 # Read from env (set by the caller or .env) — fall back to a local SQLite DB
 # for development convenience when running management commands outside Docker.
-db_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./virtual_professor.db")
-if db_url.startswith("postgresql://"):
-    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+# Render/Supabase often emit postgres://; SQLAlchemy + asyncpg need postgresql+asyncpg://.
+from core.db_url import async_database_url  # noqa: E402
+
+db_url = async_database_url(os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./virtual_professor.db"))
 config.set_main_option("sqlalchemy.url", db_url)
 
 

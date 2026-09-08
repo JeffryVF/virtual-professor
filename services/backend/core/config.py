@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     embed_provider: str = "fastembed"
     embed_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     embed_dim: int = 384  # must match the pgvector column size
+    # Loading FastEmbed on boot OOMs Render Free (512MB). Uploads still embed.
+    embed_resume_on_startup: bool = True
     llm_max_tokens: int = 350  # max tokens per LLM response (env: LLM_MAX_TOKENS)
 
     # Edge-TTS — free neural TTS (Microsoft), no local model/service

@@ -43,8 +43,25 @@ def test_adapter_does_not_add_e5_prefixes_to_minilm():
     fake_runtime.embed.return_value = iter([fake_vector])
     with patch("services.embeddings._fastembed_model", return_value=fake_runtime):
         model._get_query_embedding("que es RAG")
-        fake_runtime.embed.assert_called_once_with(["que es RAG"])
+        fake_runtime.embed.assert_called_once_with(["que es RAG"], batch_size=1)
         fake_runtime.reset_mock()
         fake_runtime.embed.return_value = iter([fake_vector])
         model._get_text_embedding("contenido")
-        fake_runtime.embed.assert_called_once_with(["contenido"])
+        fake_runtime.embed.assert_called_once_with(["contenido"], batch_size=1)
+
+
+def test_fastembed_requests_lazy_load_and_one_thread():
+    from services.embeddings import _fastembed_model
+
+    _fastembed_model.cache_clear()
+    fake_mod = MagicMock()
+    fake_instance = MagicMock()
+    fake_mod.TextEmbedding.return_value = fake_instance
+    try:
+        with patch.dict("sys.modules", {"fastembed": fake_mod}):
+            assert _fastembed_model() is fake_instance
+        kwargs = fake_mod.TextEmbedding.call_args.kwargs
+        assert kwargs["threads"] == 1
+        assert kwargs.get("lazy_load") is True
+    finally:
+        _fastembed_model.cache_clear()

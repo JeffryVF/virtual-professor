@@ -6,6 +6,7 @@ import pytest
 
 from core.config import Settings
 from core.database import _async_database_url
+from core.db_url import async_database_url
 
 
 def _find_repo_file(name: str) -> Path | None:
@@ -32,6 +33,12 @@ def test_async_url_adds_asyncpg_and_rewrites_postgres_scheme():
         == "postgresql+asyncpg://user:pass@host:5432/db"
     )
     assert _async_database_url("sqlite+aiosqlite:///./test.db") == "sqlite+aiosqlite:///./test.db"
+    assert async_database_url("postgres://user:pass@host:5432/db") == (
+        "postgresql+asyncpg://user:pass@host:5432/db"
+    )
+    assert async_database_url("postgresql+asyncpg://user:pass@host:5432/db") == (
+        "postgresql+asyncpg://user:pass@host:5432/db"
+    )
 
 
 def test_root_path_empty_on_render_slash_api_behind_nginx():
@@ -65,9 +72,27 @@ def test_render_blueprint_declares_split_services():
     assert "EMBED_PROVIDER" in text
     assert "fastembed" in text
     assert "plan: free" in text
+    assert "FASTEMBED_CACHE_PATH" in text
+    assert "EMBED_RESUME_ON_STARTUP" in text
+    assert "MALLOC_ARENA_MAX" in text
     assert "DATABASE_URL" in text
     assert "NEXT_PUBLIC_API_URL" in text
     assert "dockerfilePath: ./services/frontend/Dockerfile.prod" in text
+
+
+def test_api_dockerfile_omits_torch_for_render_ram():
+    path = None
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "Dockerfile"
+        if candidate.is_file() and (parent / "requirements.txt").is_file():
+            path = candidate
+            break
+    if path is None:
+        pytest.skip("backend Dockerfile not available from this test path")
+    text = path.read_text(encoding="utf-8")
+    assert "extra-index-url" not in text
+    assert "grep -vE" in text
+    assert "--workers 1" in text
 
 
 def test_vercel_config_lives_in_frontend():

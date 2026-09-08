@@ -4,6 +4,8 @@
 # ── Docker data volumes (persistent storage) ──────────────────
 data/
 
+.atl
+
 # ── Python ─────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]

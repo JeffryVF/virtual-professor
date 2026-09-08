@@ -6,7 +6,9 @@
 #   1. Set DATABASE_URL and ZAI_API_KEY in the Render dashboard
 #   2. The frontend calls the API directly (NEXT_PUBLIC_API_URL is a build
 #      arg pointing at this API's https://*.onrender.com URL)
-#   3. Run the embedding migration and re-index documents after deployment.
+#   3. On boot the API resizes document_chunks to VECTOR(384) if needed.
+#      Documents are vectorized on upload (not on boot) so FastEmbed does
+#      not OOM Render Free's 512MB at startup.
 
 services:
   - type: keyvalue
@@ -49,6 +51,24 @@ services:
         value: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
       - key: EMBED_DIM
         value: "384"
+      - key: FASTEMBED_CACHE_PATH
+        value: /app/.cache/fastembed
+      - key: EMBED_RESUME_ON_STARTUP
+        value: "false"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: ORT_INTRA_OP_NUM_THREADS
+        value: "1"
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
+      - key: WEB_CONCURRENCY
+        value: "1"
       - key: LLM_MAX_TOKENS
         value: "350"
       - key: JWT_SECRET_KEY

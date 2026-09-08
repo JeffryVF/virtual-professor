@@ -28,7 +28,12 @@ from models.schemas import (
     ProfessorUpdate,
     SessionResponse,
 )
-from services.ingestion import delete_document_chunks, delete_qdrant_collection, ingest_document
+from services.ingestion import (
+    delete_document_chunks,
+    delete_qdrant_collection,
+    document_source_path,
+    ingest_document,
+)
 
 
 log = logging.getLogger(__name__)
@@ -237,7 +242,7 @@ async def upload_document(
 
     ext = os.path.splitext(file.filename or "")[1].lstrip(".").lower() or "bin"
     doc_id = uuid.uuid4()
-    save_path = os.path.join(UPLOAD_DIR, str(professor_id), f"{doc_id}.{ext}")
+    save_path = document_source_path(professor_id, doc_id, ext, upload_dir=UPLOAD_DIR)
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     with open(save_path, "wb") as f:
@@ -395,7 +400,7 @@ async def reindex_document(
     await delete_document_chunks(prof.collection, doc_id_str)
 
     # Construct file path
-    save_path = os.path.join(UPLOAD_DIR, str(doc.professor_id), f"{doc_id_str}.{doc.format}")
+    save_path = document_source_path(doc.professor_id, doc_id_str, doc.format, upload_dir=UPLOAD_DIR)
 
     # Schedule background ingestion
     background_tasks.add_task(ingest_document, doc_id_str, prof.collection, save_path, doc.format)

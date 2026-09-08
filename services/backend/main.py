@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -51,13 +53,21 @@ async def lifespan(app: FastAPI):
     else:
         log.info("Debug mode — skipping production config validation")
 
-    # ── Create tables ───────────────────────────────────────────────────────
-    from sqlalchemy import text
+    if os.environ.get("RENDER"):
+        log.warning(
+            "Render Free is 512MB RAM. FastEmbed is loaded lazily on first "
+            "document upload; keep RERANKER_TYPE=none. If vectorization still "
+            "dies, upgrade the API to Render Standard (2GB)."
+        )
+
+    # ── Create tables and align pgvector embeddings ─────────────────────────
+    from core.vector_schema import ensure_embedding_dimension, ensure_vector_extension
 
     async with engine.begin() as conn:
         # pgvector must exist before the document_chunks table is created
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await ensure_vector_extension(conn)
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_embedding_dimension(conn, settings.embed_dim)
 
     # ── Seed default admin user ─────────────────────────────────────────────
     from core.database import AsyncSessionLocal
@@ -65,6 +75,13 @@ async def lifespan(app: FastAPI):
 
     async with AsyncSessionLocal() as session:
         await seed_default_admin(session)
+
+    # Re-embed leftover documents only when there is RAM to load FastEmbed.
+    # On Render Free this is off: loading the model at boot OOMs the instance.
+    if engine.dialect.name != "sqlite" and settings.embed_resume_on_startup:
+        from services.ingestion import resume_incomplete_ingestion
+
+        app.state.resume_ingestion_task = asyncio.create_task(resume_incomplete_ingestion())
 
     # ── Langfuse init ───────────────────────────────────────────────────────
     langfuse_service.init_langfuse()

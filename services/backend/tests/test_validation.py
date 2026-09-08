@@ -166,6 +166,7 @@ class TestPostParseValidation:
 
         mock_result = MagicMock()
         mock_result.scalar_one.return_value = mock_doc
+        mock_result.scalar_one_or_none.return_value = mock_doc
 
         mock_session = AsyncMock()
         mock_session.__aenter__.return_value = mock_session
@@ -213,6 +214,7 @@ class TestPostParseValidation:
 
         mock_result = MagicMock()
         mock_result.scalar_one.return_value = mock_doc
+        mock_result.scalar_one_or_none.return_value = mock_doc
 
         mock_session = AsyncMock()
         mock_session.__aenter__.return_value = mock_session

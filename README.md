@@ -664,22 +664,29 @@ The browser calls the Render API directly (`NEXT_PUBLIC_API_URL` is baked into t
 
 `render.yaml` pre-sets `CORS_ORIGINS=https://virtual-professor-frontend.onrender.com` on the API. If you rename the frontend service, update its `.onrender.com` origin and redeploy the API.
 
-### 3. Migrate and re-index knowledge
+### 3. Vectorize knowledge
 
-From a machine with the repository and Supabase `DATABASE_URL` configured:
+The API enables `pgvector` and creates tables on boot. If
+`document_chunks.embedding` is not `VECTOR(384)`, it truncates old vectors
+and resizes the column (Z.AI `embedding-3` used `VECTOR(1024)`, which
+rejects FastEmbed's 384-d vectors).
 
-```powershell
-cd services/backend
-alembic upgrade head
-```
+Documents are embedded **on upload**, not at startup. Render Free has
+**512MB RAM**; loading FastEmbed (~220MB) during boot would OOM-kill the
+API before `/health` passed. The production image also skips PyTorch and
+the BGE reranker for the same reason.
 
-The migration clears old vectors and changes the column to `VECTOR(384)`.
-Re-upload every professor document from the admin UI. The backend downloads
-`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` once and embeds documents locally.
+If vectorization still dies after an upload (document stuck on `pending`
+or `error`), the instance ran out of memory. Upgrade
+`virtual-professor-api` from **Free (512MB)** to **Standard (2GB)** and
+re-upload the file.
+
+The FastEmbed model is baked into the API image, so the first upload does
+not wait on a Hugging Face download.
 
 Render Free services have ephemeral filesystems, so uploaded source files are
-temporary. The indexed chunks remain in Supabase; keep originals in a durable
-storage bucket if you need to re-upload them later.
+lost on restart. Indexed chunks remain in Supabase. If a document shows
+`SOURCE_MISSING`, re-upload it from the admin UI.
 
 Default model is free `glm-4.7-flash`. Paid GLM-5: set `ZAI_LLM_MODEL=glm-5` on the API service.
 

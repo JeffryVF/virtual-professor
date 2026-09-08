@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import os
 
 import fitz
 from llama_index.core.node_parser import SentenceSplitter
@@ -8,15 +10,17 @@ from llama_index.readers.file import (
     PDFReader,
     PptxReader,
 )
+from sqlalchemy import delete, or_, select
 
 from core.config import settings
 from core.database import AsyncSessionLocal
-from models.db import DocumentChunk
+from models.db import Document, DocumentChunk, DocumentStatus, Professor
 from services.embeddings import get_embed_model
+
+log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50
-log = logging.getLogger(__name__)
 
 _FORMAT_READERS: dict[str, type[BaseReader]] = {
     "pdf": PDFReader,
@@ -63,6 +67,20 @@ def _validate_document(file_path: str, file_format: str, max_pages: int) -> tupl
     return (True, "")
 
 
+def document_source_path(
+    professor_id,
+    document_id,
+    file_format: str,
+    upload_dir: str | None = None,
+) -> str:
+    """On-disk path used at upload time and when resuming vectorization."""
+    return os.path.join(
+        upload_dir or settings.upload_dir,
+        str(professor_id),
+        f"{document_id}.{file_format}",
+    )
+
+
 async def ingest_document(
     document_id: str,
     professor_collection: str,
@@ -70,19 +88,21 @@ async def ingest_document(
     file_format: str,
 ) -> None:
     """Background task: parse, chunk, embed and store a document in pgvector."""
-    from sqlalchemy import delete, select
-    from sqlalchemy.ext.asyncio import AsyncSession
-
-    from models.db import Document, DocumentStatus
-
     async with AsyncSessionLocal() as db:
         try:
             result = await db.execute(select(Document).where(Document.id == document_id))
-            doc = result.scalar_one()
+            doc = result.scalar_one_or_none()
+            if doc is None:
+                log.error("ingest_document: document %s not found", document_id)
+                return
             doc.status = DocumentStatus.processing
             doc.error_message = None
             await db.commit()
-            log.info("Starting document ingestion: document_id=%s format=%s", document_id, file_format)
+            log.warning(
+                "Starting document ingestion: document_id=%s format=%s",
+                document_id,
+                file_format,
+            )
 
             # Pre-ingestion validation
             is_valid, error_msg = _validate_document(
@@ -97,7 +117,7 @@ async def ingest_document(
                 log.warning("Document validation failed: document_id=%s error=%s", document_id, error_msg)
                 return
 
-            embed_model = get_embed_model()
+            embed_model = await asyncio.to_thread(get_embed_model)
 
             # Load and parse document
             if file_format == "url":
@@ -125,13 +145,10 @@ async def ingest_document(
                 log.warning("Document produced no chunks: document_id=%s", document_id)
                 return
 
-            # Fetch document for source_filename metadata
-            result = await db.execute(select(Document).where(Document.id == document_id))
-            doc = result.scalar_one()
-
             # Embed all chunks in a single batch
-            embeddings = embed_model.get_text_embedding_batch(
-                [node.get_content() for node in nodes]
+            contents = [node.get_content() for node in nodes]
+            embeddings = await asyncio.to_thread(
+                embed_model.get_text_embedding_batch, contents
             )
 
             # Replace any previous chunks for this document, then insert fresh rows
@@ -159,16 +176,68 @@ async def ingest_document(
             doc.status = DocumentStatus.ready
             doc.chunk_count = len(nodes)
             await db.commit()
-            log.info("Document ingestion completed: document_id=%s chunks=%s", document_id, len(nodes))
+            log.warning(
+                "Document ingestion completed: document_id=%s chunks=%s",
+                document_id,
+                len(nodes),
+            )
 
         except Exception as exc:
-            result = await db.execute(select(Document).where(Document.id == document_id))
-            doc = result.scalar_one()
-            doc.status = DocumentStatus.error
-            doc.error_message = str(exc)
-            await db.commit()
             log.exception("Document ingestion failed: document_id=%s", document_id)
+            result = await db.execute(select(Document).where(Document.id == document_id))
+            failed = result.scalar_one_or_none()
+            if failed is not None:
+                failed.status = DocumentStatus.error
+                failed.error_message = str(exc)
+                await db.commit()
             raise
+
+
+async def resume_incomplete_ingestion() -> None:
+    """Embed documents that never landed in pgvector, if the source file still exists.
+
+    Covers leftover Qdrant-era rows (``ready`` with no ``document_chunks``),
+    crashed uploads (``pending``/``processing``), and a VECTOR(1024)→384 resize
+    that truncated old embeddings.
+    """
+    chunked = select(DocumentChunk.document_id).distinct()
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Document, Professor)
+            .join(Professor, Document.professor_id == Professor.id)
+            .where(
+                or_(
+                    Document.status.in_(
+                        (DocumentStatus.pending, DocumentStatus.processing)
+                    ),
+                    Document.id.not_in(chunked),
+                )
+            )
+            .where(Document.status != DocumentStatus.error)
+        )
+        jobs = list(result.all())
+
+    if not jobs:
+        return
+
+    log.warning("Vectorizing %s document(s) missing pgvector embeddings", len(jobs))
+    for doc, prof in jobs:
+        save_path = document_source_path(doc.professor_id, doc.id, doc.format)
+        if not os.path.isfile(save_path):
+            async with AsyncSessionLocal() as db:
+                fresh = await db.get(Document, doc.id)
+                if fresh is None:
+                    continue
+                fresh.status = DocumentStatus.error
+                fresh.error_message = (
+                    "SOURCE_MISSING: uploaded file is gone. Re-upload the document to vectorize it."
+                )
+                await db.commit()
+            continue
+        try:
+            await ingest_document(str(doc.id), prof.collection, save_path, doc.format)
+        except Exception:
+            log.exception("Failed to vectorize document %s on startup", doc.id)
 
 
 async def delete_qdrant_collection(collection_name: str) -> None:
@@ -176,10 +245,6 @@ async def delete_qdrant_collection(collection_name: str) -> None:
 
     Kept under a legacy name for call-site compatibility; there is no Qdrant anymore.
     """
-    from sqlalchemy import delete, select
-
-    from models.db import Document, DocumentChunk, Professor
-
     async with AsyncSessionLocal() as db:
         prof_result = await db.execute(
             select(Professor).where(Professor.collection == collection_name)
@@ -198,8 +263,6 @@ async def delete_qdrant_collection(collection_name: str) -> None:
 
 async def delete_document_chunks(professor_collection: str, document_id: str) -> None:
     """Remove all stored chunks that belong to a specific document."""
-    from sqlalchemy import delete
-
     async with AsyncSessionLocal() as db:
         await db.execute(
             delete(DocumentChunk).where(DocumentChunk.document_id == document_id)

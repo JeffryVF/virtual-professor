@@ -7,6 +7,7 @@ import pytest_asyncio
 
 from uuid import UUID
 
+from core.config import settings
 from models.db import Document, DocumentChunk, DocumentStatus, Language, Professor
 
 
@@ -26,7 +27,7 @@ async def ready_doc_chunks(db_session, test_professor, test_document_ready):
                     chunk_index=i,
                     text=text_factory(i),
                     page_label=str(i + 1),
-                    embedding=[0.0] * 1024,
+                    embedding=[0.0] * settings.embed_dim,
                 )
             )
         db_session.add_all(chunks)
