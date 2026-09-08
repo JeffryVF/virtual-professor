@@ -42,6 +42,7 @@ class TestEmptyContextEarlyReturn:
             history=[],
             context_chunks=[],
             query="What is photosynthesis?",
+            language="es",
         )
         assert result == GRACEFUL_MESSAGE
 
@@ -97,6 +98,7 @@ class TestEmptyContextEarlyReturn:
                 history=[],
                 context_chunks=[],
                 query="What is photosynthesis?",
+                language="es",
             )
 
         assert result == GRACEFUL_MESSAGE
@@ -397,3 +399,135 @@ class TestLangfuseSpans:
             )
 
         assert result is True
+
+
+class TestScopeFastPathPunctuation:
+    """Fast-path keyword matching ignores punctuation (e.g. 'calculo?')."""
+
+    @pytest.mark.asyncio
+    async def test_domain_keyword_match_with_question_mark(self):
+        """GIVEN a Spanish query ending with punctuation and a Calculus topic
+        WHEN is_in_scope is called
+        THEN it returns True via the domain-keyword fast path without invoking the LLM.
+        """
+        with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
+            result = await is_in_scope("Hola que sabes de calculo?", "Calculus")
+
+        assert result is True
+        mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_domain_keyword_match_spanish_derivative(self):
+        """GIVEN a derivative question in Spanish and a Calculus topic
+        WHEN is_in_scope is called
+        THEN it returns True via the fast path without invoking the LLM.
+        """
+        with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
+            result = await is_in_scope("que es la derivada?", "Calculus")
+
+        assert result is True
+        mock_client_cls.assert_not_called()
+
+
+class TestLowRelevancePrompt:
+    """Low-relevance (relaxed RAG floor) prompt guidance."""
+
+    @pytest.mark.asyncio
+    async def test_low_relevance_adds_guidance(self):
+        """GIVEN low_relevance=True
+        WHEN generate_response is called
+        THEN the system prompt tells the professor to answer within its topic.
+        """
+        mock_response = MagicMock()
+        mock_response.json.return_value = _zai_response("ok")
+
+        with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+
+            await generate_response(
+                system_prompt="Assistant",
+                history=[],
+                context_chunks=[
+                    ContextChunk(text="Chunk.", source_document="d.txt",
+                                 source_document_id="uuid-1"),
+                ],
+                query="hi",
+                low_relevance=True,
+            )
+
+        system = _system_content(mock_client)
+        assert "closest match" in system
+        assert "Never claim to have no information" in system
+
+    @pytest.mark.asyncio
+    async def test_low_relevance_false_omits_guidance(self):
+        """GIVEN low_relevance=False (default)
+        WHEN generate_response is called
+        THEN the low-relevance guidance is not in the system prompt.
+        """
+        mock_response = MagicMock()
+        mock_response.json.return_value = _zai_response("ok")
+
+        with patch("services.llm.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=mock_response)
+
+            await generate_response(
+                system_prompt="Assistant",
+                history=[],
+                context_chunks=[
+                    ContextChunk(text="Chunk.", source_document="d.txt",
+                                 source_document_id="uuid-1"),
+                ],
+                query="hi",
+            )
+
+        assert "closest match" not in _system_content(mock_client)
+
+
+class TestModelFailoverOn429:
+    """Rate-limit failover from the primary Z.AI model to the fallback."""
+
+    @pytest.mark.asyncio
+    async def test_fails_over_to_fallback_model_after_repeated_429(self):
+        """GIVEN the primary model keeps returning 429
+        WHEN _chat_complete runs
+        THEN it retries once and then switches to the configured fallback model.
+        """
+        mock_settings = MagicMock()
+        mock_settings.zai_llm_model = "glm-4.7-flash"
+        mock_settings.zai_fallback_llm_model = "glm-4.5-flash"
+        mock_settings.llm_max_tokens = 350
+        mock_settings.zai_base_url = "https://api.z.ai/api/paas/v4"
+        mock_settings.zai_api_key = "test-key"
+
+        r429 = MagicMock(status_code=429)
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = _zai_response("fallback answer")
+
+        with (
+            patch("services.llm.settings", mock_settings),
+            patch("services.llm.httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(side_effect=[r429, r429, ok])
+
+            result = await generate_response(
+                system_prompt="Assistant",
+                history=[],
+                context_chunks=[
+                    ContextChunk(text="Chunk.", source_document="d.txt",
+                                 source_document_id="uuid-1"),
+                ],
+                query="test",
+            )
+
+        assert result == "fallback answer"
+        assert mock_client.post.call_count == 3
+        calls = mock_client.post.call_args_list
+        assert calls[0][1]["json"]["model"] == "glm-4.7-flash"
+        assert calls[2][1]["json"]["model"] == "glm-4.5-flash"

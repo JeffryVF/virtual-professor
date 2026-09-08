@@ -1,5 +1,10 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
+# NEXT_PUBLIC_* values are inlined at build time, so they must be provided
+# as build args (Render passes them via blueprint buildArgs). Default is the
+# local docker/nginx path (`/api` rewritten to FastAPI).
+ARG NEXT_PUBLIC_API_URL=/api
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .

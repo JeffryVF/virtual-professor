@@ -24,9 +24,9 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 ## Overview
 
 - Admins create professors, each scoped to a specific topic (e.g., Mathematics, History, Biology)
-- Admins upload knowledge documents in any format (PDF, DOCX, MP4, MP3, URLs, etc.)
+- Admins upload knowledge documents (PDF, DOCX, PPTX, TXT, or web URLs)
 - Students select a professor avatar and interact via voice in Spanish or English
-- The avatar listens, retrieves relevant knowledge, and responds using a synchronized lip-synced avatar
+- The browser captures speech (Web Speech API), the backend retrieves relevant knowledge and replies with audio (Edge-TTS) that the lip-synced avatar speaks
 - If a student asks something outside the professor's topic, the system redirects them politely
 - All conversation history and student sessions are persisted
 
@@ -56,8 +56,8 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 │         │                 │                                     │
 │  ┌──────▼─────────────────▼──────────────────────────────────┐  │
 │  │               Orchestrator (Agent)                         │  │
-│  │   1. STT → 2. Scope Check → 3. RAG → 4. Reranker          │  │
-│  │         → 5. LLM Prompt → 6. TTS                          │  │
+│  │   1. STT (browser) → 2. Scope Check → 3. RAG → 4. Reranker│  │
+│  │         → 5. LLM Prompt → 6. TTS (Edge-TTS)               │  │
 │  │                           ┌──────────────────────────┐     │  │
 │  │                           │  Langfuse Observability   │     │  │
 │  │                           │  (traces every step)      │     │  │
@@ -65,10 +65,11 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 │  └──────┬───────────┬──────────────────┬──────────┬──────────┘  │
 └─────────┼───────────┼──────────────────┼──────────┼────────────┘
           │           │                  │          │
-    ┌─────▼──┐  ┌─────▼──┐  ┌───────────▼──┐ ┌────▼────┐
-    │Whisper │  │  Z.AI  │  │    Qdrant    │ │ Kokoro  │
-    │  STT   │  │  GLM   │  │  Vector DB   │ │   TTS   │
-    └────────┘  └────────┘  └──────┬───────┘ └─────────┘
+    ┌─────┴────┐ ┌─────▼──┐  ┌───────────▼──┐ ┌────▼───────────┐
+    │Browser   │ │  Z.AI  │  │  PostgreSQL  │ │  Edge-TTS     │
+    │SpeechRec │ │  GLM   │  │  (pgvector)  │ │  (Microsoft)  │
+    │ognition  │ │        │  │  Vector DB   │ │   TTS         │
+    └──────────┘ └────────┘  └──────┬───────┘ └────────────────┘
                                    │
                             ┌──────▼──────┐   ┌─────────┐
                             │ BGE Reranker│   │  Redis  │
@@ -93,43 +94,45 @@ An AI-powered virtual professor system that lets students interact with avatar-b
 
 | Service | Image | Port | Role |
 |---|---|---|---|
-| `backend` | custom FastAPI | 8000 | Orchestrator, REST API, session management |
-| `frontend` | custom Next.js | 3000 | Student portal + Admin portal |
-| `whisper` | `onerahmet/openai-whisper` | 9000 | Speech-to-Text (ES/EN) |
-| `qdrant` | `qdrant/qdrant` | 6333 | Vector database, per-professor collections |
-| `kokoro` | custom wrapper | 8880 | Text-to-Speech (ES/EN voices) |
-| `postgres` | `postgres:16` | 5432 | Students, professors, sessions, messages |
+| `backend` | custom FastAPI | 8000 | Orchestrator, REST API, RAG, Edge-TTS, session management |
+| `frontend` | custom Next.js | 3000 | Student portal + Admin portal (dev compose only; Render in prod) |
+| `postgres` | `pgvector/pgvector:pg16` | 5432 | Relational data + pgvector embeddings |
 | `redis` | `redis:7` | 6379 | Active session context cache |
-| `nginx` | `nginx` | 80/443 | Reverse proxy |
+| `nginx` | `nginx` | 80/443 | Reverse proxy (dev compose only) |
 
 ### Service Responsibilities
 
 **backend (FastAPI)**
-- Receives audio from the LiveAvatar SDK
-- Orchestrates the full pipeline: STT → scope check → RAG → LLM → TTS
+- Receives text from the browser (Web Speech API transcript or typed text)
+- Orchestrates the full pipeline: scope check → RAG → LLM → TTS
 - Manages professors, documents, students, and sessions
 - Runs document ingestion as background tasks
+- Synthesizes speech with Edge-TTS and returns `audio/mpeg` bytes for the avatar
 
-**whisper**
-- Transcribes student audio to text
-- Multilingual: auto-detects Spanish and English
-- Model: `base` for speed, `small` or `medium` for accuracy
+**Client-side Speech-to-Text**
+- The browser captures audio and transcribes it with the **Web Speech API** (`SpeechRecognition`, Chrome/Edge)
+- A visible text-input fallback covers Firefox/Safari where the API is unavailable
+- No server-side STT service required
 
 **Z.AI (GLM)**
 - Cloud LLM via the [Z.AI Open Platform](https://docs.z.ai/guides/llm/glm-5) (OpenAI-compatible chat completions)
 - Default model: `glm-4.7-flash` (free). Set `ZAI_LLM_MODEL=glm-5` to use GLM-5 (paid)
-- Also provides `embedding-3` for RAG so no local Ollama process is required
+- RAG embeddings run locally with FastEmbed and a multilingual MiniLM model; no embedding API key is required
 - Thinking mode is disabled for short spoken professor replies
 
-**qdrant**
-- One collection per professor
-- Stores document chunks with embeddings and metadata
-- Supports filtering by professor, document, and language
+**FastEmbed (embeddings)**
+- Local `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384-dim) runs inside the backend
+- The model is downloaded once per deployed instance and is reused by ingestion and retrieval
 
-**kokoro**
-- Converts LLM response text to speech audio
-- Supports distinct voices per professor
-- Returns audio bytes sent directly to LiveAvatar LITE
+**pgvector (in PostgreSQL)**
+- One embedding row per document chunk, filtered by professor collection
+- Stores embeddings and metadata (source filename, page label)
+- Rows are deleted and re-inserted on re-index
+
+**Edge-TTS**
+- Converts LLM response text to `audio/mpeg` bytes via Microsoft's free neural voices
+- ES/EN voices configured with `EDGE_TTS_VOICE_ES` / `EDGE_TTS_VOICE_EN`
+- Returns audio bytes sent directly to LiveAvatar LITE for lip-sync
 
 **postgres**
 - Stores all relational data: professors, documents, students, sessions, messages
@@ -150,7 +153,7 @@ name           VARCHAR     professor display name
 topic          VARCHAR     scope boundary (e.g., "Calculus", "World History")
 language       ENUM        es | en | both
 avatar_id      VARCHAR     LiveAvatar free avatar UUID
-collection     VARCHAR     Qdrant collection name
+collection     VARCHAR     per-professor pgvector filter key (uniq)
 system_prompt  TEXT        personality and tone instructions for the LLM
 created_at     TIMESTAMP
 ```
@@ -160,9 +163,9 @@ created_at     TIMESTAMP
 id             UUID        PRIMARY KEY
 professor_id   UUID        FOREIGN KEY → professors.id
 filename       VARCHAR     original filename
-format         VARCHAR     pdf | docx | pptx | txt | mp3 | mp4 | url | csv | json
+format         VARCHAR     pdf | docx | pptx | txt | url
 status         ENUM        pending | processing | ready | error
-chunk_count    INTEGER     number of chunks stored in Qdrant
+chunk_count    INTEGER     number of chunks stored in pgvector
 error_message  TEXT        populated if status = error
 uploaded_at    TIMESTAMP
 ```
@@ -192,8 +195,21 @@ id             UUID        PRIMARY KEY
 session_id     UUID        FOREIGN KEY → sessions.id
 role           ENUM        student | professor
 content        TEXT        transcribed or generated text
-audio_path     VARCHAR     optional path to stored audio file
+sources_json   TEXT        JSON of RAG source citations
 timestamp      TIMESTAMP
+```
+
+### document_chunks
+```
+id                  UUID        PRIMARY KEY
+document_id         UUID        FOREIGN KEY → documents.id
+professor_collection VARCHAR    filter key matching professors.collection
+chunk_index         INTEGER     order within the document
+text                TEXT        chunk content
+embedding           VECTOR(384) pgvector embedding (FastEmbed multilingual MiniLM)
+page_label          VARCHAR     optional page reference
+metadata            JSON        document_id, professor_collection, source_filename
+created_at          TIMESTAMP
 ```
 
 ---
@@ -203,19 +219,18 @@ timestamp      TIMESTAMP
 ```
 1.  Student opens browser → selects professor avatar
 2.  LiveAvatar Web SDK initializes WebRTC session (LITE mode)
-3.  Student speaks → browser captures microphone audio
-4.  Audio chunk → POST /sessions/{id}/speak (our backend)
-5.  Whisper transcribes audio → text
-6.  Redis: load last N messages (short-term memory / conversation context)
-7.  LlamaIndex: embed query → retrieve top-k chunks from professor's Qdrant collection
-8.  Scope check (LLM or keyword): is the query related to the professor's topic?
+3.  Student speaks → browser transcribes with Web Speech API (SpeechRecognition)
+4.  Transcript (or typed fallback text) → POST /sessions/{id}/speak (JSON {"text": ...})
+5.  Redis: load last N messages (short-term memory / conversation context)
+6.  LlamaIndex: embed query → retrieve top-k chunks from pgvector (cosine distance, per professor)
+7.  Scope check (LLM): is the query related to the professor's topic?
     ├── IN SCOPE  → build prompt (system_prompt + history + retrieved context + query)
     │              → Z.AI GLM generates response text
     └── OUT OF SCOPE → static redirect: "Please ask questions related to [topic]."
-9.  Response text → Kokoro TTS → audio bytes
-10. Audio bytes returned to LiveAvatar LITE → avatar lip-syncs and speaks
-11. Message pair (student + professor) saved to PostgreSQL
-12. Redis: update session context with new exchange
+8.  Response text → Edge-TTS → audio/mpeg bytes
+9.  Audio bytes returned to LiveAvatar LITE → avatar lip-syncs and speaks
+10. Message pair (student + professor) saved to PostgreSQL
+11. Redis: update session context with new exchange
 ```
 
 **Short-term memory:** last 10 message pairs cached in Redis per session.
@@ -230,24 +245,25 @@ Admin uploads file → POST /admin/professors/{id}/documents
     ↓
 FastAPI BackgroundTask
     ↓
-LlamaIndex reader (format-specific)
-    ├── PDF/DOCX/PPTX/TXT  → SimpleDirectoryReader
-    ├── MP3/MP4            → Whisper transcription → text
-    ├── URL                → web scraper reader
-    └── CSV/JSON           → structured reader
+Format-specific reader (llama-index)
+    ├── PDF  → PDFReader (+ PyMuPDF validation: encrypted / pages / scanned)
+    ├── DOCX → DocxReader
+    ├── PPTX → PptxReader
+    ├── TXT  → plain text fallback
+    └── URL  → SimpleWebPageReader(html_to_text=True)
     ↓
 Text extraction + cleaning
     ↓
 Chunking: 512 tokens, 50 token overlap, metadata tagging
     ↓
-Embedding: Z.AI embedding-3
+Embedding: FastEmbed multilingual MiniLM (local, provider-independent)
     ↓
-Upsert into professor's Qdrant collection
+Insert rows into document_chunks (pgvector) with source_filename metadata
     ↓
 Document status updated to "ready"
 ```
 
-**Continuous updates:** documents can be re-uploaded at any time. Old chunks are removed and replaced. The professor's collection is always up to date.
+**Continuous updates:** documents can be re-uploaded at any time. Old chunks are removed and replaced. The professor's data is always up to date.
 
 ---
 
@@ -262,9 +278,11 @@ Document status updated to "ready"
 | `GET` | `/admin/professors/{id}` | Get professor details |
 | `PATCH` | `/admin/professors/{id}` | Update professor metadata |
 | `DELETE` | `/admin/professors/{id}` | Delete professor and all data |
-| `POST` | `/admin/professors/{id}/documents` | Upload document (any format) |
+| `POST` | `/admin/professors/{id}/documents` | Upload a knowledge document (pdf, docx, pptx, txt, url) |
 | `GET` | `/admin/professors/{id}/documents` | List professor's documents |
-| `DELETE` | `/admin/documents/{id}` | Remove document and its Qdrant chunks |
+| `GET` | `/admin/documents/{id}/chunks` | Paginated stored chunks for a document |
+| `GET` | `/admin/indexing/status` | Per-professor indexing statistics |
+| `DELETE` | `/admin/documents/{id}` | Remove document and its pgvector chunks |
 | `GET` | `/admin/sessions` | List all sessions with usage stats |
 | `GET` | `/admin/sessions/{id}/history` | Full conversation of a session |
 
@@ -276,7 +294,7 @@ Document status updated to "ready"
 | `GET` | `/professors/{id}` | Get professor info |
 | `POST` | `/sessions/students` | Register student |
 | `POST` | `/sessions` | Start a new session |
-| `POST` | `/sessions/{id}/speak` | Send audio, receive audio response |
+| `POST` | `/sessions/{id}/speak` | Send text, receive `audio/mpeg` response bytes |
 | `POST` | `/sessions/{id}/liveavatar-connect` | Exchange LiveAvatar token for session |
 | `POST` | `/sessions/{id}/compress` | Compress completed session |
 | `GET` | `/sessions/{id}/history` | Get conversation history |
@@ -290,7 +308,7 @@ Document status updated to "ready"
 virtual-professor/
 ├── docker-compose.yml
 ├── docker-compose.override.yml       ← dev overrides (hot-reload, debug)
-├── render.yaml                       ← Render Blueprint (API + Postgres + Redis + Qdrant + Whisper + Kokoro)
+├── render.yaml                       ← Render Blueprint (API + Postgres + Redis)
 ├── .env.example
 ├── README.md
 ├── AGENTS.md                         ← AI contributor guide
@@ -305,11 +323,10 @@ virtual-professor/
 │   │   │   ├── sessions.py           ← voice session handling
 │   │   │   └── professors.py         ← public professor listing
 │   │   ├── services/
-│   │   │   ├── stt.py                ← Whisper HTTP client
-│   │   │   ├── tts.py                ← Kokoro HTTP client
+│   │   │   ├── tts.py                ← Edge-TTS client (audio/mpeg)
 │   │   │   ├── llm.py                ← Z.AI GLM client + prompt building
-│   │   │   ├── embeddings.py         ← Z.AI embedding-3 client (RAG)
-│   │   │   ├── rag.py                ← LlamaIndex + Qdrant retrieval
+│   │   │   ├── embeddings.py         ← local FastEmbed adapter
+│   │   │   ├── rag.py                ← LlamaIndex + pgvector retrieval
 │   │   │   ├── reranker.py           ← BGE cross-encoder reranker
 │   │   │   ├── memory.py             ← Redis session context manager
 │   │   │   ├── ingestion.py          ← document processing pipeline
@@ -330,7 +347,7 @@ virtual-professor/
 │   │
 │   ├── frontend/
 │   │   ├── Dockerfile
-│   │   ├── vercel.json               ← Vercel project (Root Directory = services/frontend)
+│   │   ├── Dockerfile.prod            ← Render build (standalone Next.js)
 │   │   ├── package.json
 │   │   ├── src/
 │   │   │   ├── app/
@@ -358,14 +375,8 @@ virtual-professor/
 │   │   │       └── api.ts            ← API client with auth headers
 │   │   └── public/
 │   │
-│   └── kokoro/
-│       ├── Dockerfile
-│       ├── server.py                 ← FastAPI wrapper around Kokoro TTS
-│       └── requirements.txt
-│
 ├── data/
 │   ├── uploads/                      ← raw uploaded files (mounted volume)
-│   ├── qdrant/                       ← Qdrant persistent storage
 │   └── postgres/                     ← PostgreSQL persistent storage
 │
 ├── config/
@@ -383,17 +394,14 @@ virtual-professor/
 
 ## Docker Compose
 
-The stack is defined in [`docker-compose.yml`](./docker-compose.yml) at the repo root. It includes 9 services:
+The stack is defined in [`docker-compose.yml`](./docker-compose.yml) at the repo root. It includes 6 services:
 
 | Service | Image | Role |
 |---------|-------|------|
-| `nginx` | nginx:alpine | Reverse proxy |
-| `frontend` | custom Node.js | Next.js app |
+| `nginx` | nginx:alpine | Reverse proxy (dev just for convenience) |
+| `frontend` | custom Node.js | Next.js app. Real prod hosting is Render (`Dockerfile.prod`) |
 | `backend` | custom Python | FastAPI orchestrator |
-| `whisper` | onerahmet/openai-whisper-asr-webservice | Speech-to-Text |
-| `qdrant` | qdrant/qdrant | Vector database |
-| `kokoro` | custom Python | Text-to-Speech |
-| `postgres` | postgres:16-alpine | Relational database |
+| `postgres` | pgvector/pgvector:pg16 | Relational DB + pgvector embeddings |
 | `redis` | redis:7-alpine | Session cache |
 
 Development overrides (hot-reload, debug ports) live in `docker-compose.override.yml` and are applied automatically when you run `docker compose up`.
@@ -407,7 +415,7 @@ Development overrides (hot-reload, debug ports) live in `docker-compose.override
 Copy `.env.example` to `.env` and fill in the values.
 
 ```env
-# PostgreSQL
+# PostgreSQL (pgvector)
 POSTGRES_USER=profesor
 POSTGRES_PASSWORD=changeme
 POSTGRES_DB=virtual_profesor
@@ -416,20 +424,21 @@ DATABASE_URL=postgresql://profesor:changeme@postgres:5432/virtual_profesor
 # Redis
 REDIS_URL=redis://redis:6379
 
-# Qdrant
-QDRANT_URL=http://qdrant:6333
-
-# Z.AI (GLM)
+# Z.AI (GLM — chat LLM only; international API has no embedding models)
 ZAI_API_KEY=your-z-ai-api-key
 ZAI_BASE_URL=https://api.z.ai/api/paas/v4
 ZAI_LLM_MODEL=glm-4.7-flash
-ZAI_EMBED_MODEL=embedding-3
 
-# Whisper
-WHISPER_URL=http://whisper:9000
+# Embeddings (RAG). Local FastEmbed; no provider key is needed.
+EMBED_PROVIDER=fastembed
+EMBED_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+EMBED_DIM=384
 
-# Kokoro TTS
-KOKORO_URL=http://kokoro:8880
+# Edge-TTS
+EDGE_TTS_VOICE_EN=en-US-JennyNeural
+EDGE_TTS_VOICE_ES=es-ES-ElviraNeural
+EDGE_TTS_RATE=+0%
+TTS_MAX_TOTAL_CHARS=6000
 
 # LiveAvatar
 LIVEAVATAR_API_KEY=your_key_here
@@ -437,6 +446,12 @@ LIVEAVATAR_API_URL=https://api.liveavatar.com
 
 # Admin
 ADMIN_API_KEY=changeme
+
+# Default admin user — seeded automatically on first startup.
+# Set a real password before deploying anywhere public.
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=changeme
+ADMIN_NAME=Administrator
 
 # Session memory
 SESSION_MEMORY_MESSAGES=10
@@ -448,11 +463,11 @@ SESSION_TIMEOUT_MINUTES=30
 ## Open Items
 
 | # | Item | Status | Notes |
-|---|---|---|---|---|
+|---|---|---|---|
 | 1 | LiveAvatar API key + sandbox | Pending | Register at liveavatar.com to get key and test LITE mode |
-| 2 | LLM model selection | Pending | Start with `llama3.2` (fast) or `mistral` (quality) |
-| 3 | Kokoro voice selection | Pending | Pick ES + EN voices per professor or globally |
-| 4 | GPU availability | Pending | Affects Whisper + Kokoro speed significantly |
+| 2 | LLM model selection | Pending | Start with free `glm-4.7-flash` or paid `glm-5` |
+| 3 | Edge-TTS voice tuning | Done | ES/EN voices via `EDGE_TTS_VOICE_ES` / `EDGE_TTS_VOICE_EN` |
+| 4 | Embedding size lock | Done | pgvector column is fixed `VECTOR(384)` (multilingual MiniLM) |
 | 5 | Admin auth | **In progress** | See [plan 02](docs/plans/02-auth-backend.md) |
 | 6 | Student auth | **In progress** | See [plan 03](docs/plans/03-auth-frontend.md) |
 | 7 | RAG source citations in frontend | **In progress** | See [plan 04](docs/plans/04-rag-visible.md) |
@@ -465,7 +480,6 @@ SESSION_TIMEOUT_MINUTES=30
 ### Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
-- 8 GB RAM minimum (16 GB recommended when running Whisper + Kokoro locally)
 - A [Z.AI](https://z.ai) API key (free `glm-4.7-flash` / `glm-4.5-flash` models are listed on [pricing](https://docs.z.ai/guides/overview/pricing))
 - A LiveAvatar account and API key (register at liveavatar.com — sandbox mode is free)
 
@@ -486,23 +500,12 @@ Open `.env` and set at minimum:
 - `LIVEAVATAR_API_KEY` — your key from liveavatar.com
 - `POSTGRES_PASSWORD` — any secure password
 - `ADMIN_API_KEY` — any secret you'll use to call `/admin` endpoints
+- `ADMIN_EMAIL` / `ADMIN_PASSWORD` — the default admin login seeded on first startup
 - `JWT_SECRET_KEY` — generate with `openssl rand -hex 32`
 
 ---
 
-### Step 2 — Download Kokoro TTS model files (first time only)
-
-```bash
-# Build the kokoro image first
-docker compose build kokoro
-
-# Download models into the persistent volume
-docker compose run --rm kokoro python download_models.py
-```
-
----
-
-### Step 3 — Start all services
+### Step 2 — Start all services
 
 # Development (auto-uses override.yml with hot-reload + debug ports)
 ```bash
@@ -525,16 +528,12 @@ The database tables are created automatically on first backend startup (SQLAlche
 
 ---
 
----
-
 ### Step 4 — Verify everything is running
 
 | Service | URL | Expected response |
 |---|---|---|
-| Backend API | http://localhost/api/health | JSON with `"status": "healthy"` or `"degraded"` and a `zai` probe |
+| Backend API | http://localhost/api/health | JSON with `"status": "healthy"` or `"degraded"` and `postgres`/`redis`/`zai` probes |
 | API Docs (Swagger) | http://localhost/api/docs | Interactive API UI |
-| Qdrant dashboard | http://localhost:6333/dashboard | Qdrant web UI |
-| Kokoro TTS | http://localhost:8880/health | `{"status":"ok","model_loaded":true}` |
 
 ---
 
@@ -611,10 +610,11 @@ curl -X POST http://localhost/api/sessions \
   -H "Content-Type: application/json" \
   -d '{"student_id": "<student-id>", "professor_id": "<professor-id>"}'
 
-# Send an audio question, receive audio answer (WAV)
+# Send a text question, receive an audio/mpeg answer
 curl -X POST http://localhost/api/sessions/{session_id}/speak \
-  -F "audio=@question.wav" \
-  --output answer.wav
+  -H "Content-Type: application/json" \
+  -d '{"text": "What is a derivative?"}' \
+  --output answer.mp3
 ```
 
 ---
@@ -631,65 +631,61 @@ docker compose down -v
 
 ---
 
-### GPU support (optional)
+## Cloud deployment (Render only)
 
-To enable GPU acceleration for Whisper, add an NVIDIA `deploy` reservation to the `whisper` service in `docker-compose.yml`. Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on the host. The LLM no longer runs locally.
-
----
-
-## Cloud deployment (Vercel + Render)
-
-Services are split so the LLM no longer eats RAM on the API box.
+Render hosts the frontend, API, and a volatile Redis cache. Supabase hosts the
+persistent PostgreSQL database with pgvector.
 
 | Piece | Where | Config |
 |---|---|---|
-| Frontend | [Vercel](https://vercel.com) | Root Directory `services/frontend`. Env: `NEXT_PUBLIC_API_URL=https://<api>.onrender.com` |
-| API | [Render](https://render.com) Blueprint `render.yaml` | `virtual-professor-api` — health `/health` |
-| Postgres | Render | `virtual-professor-db` (private) |
+| Frontend | Render Blueprint | `virtual-professor-frontend` — Next.js standalone, health `/` |
+| API | Render Blueprint | `virtual-professor-api` — health `/health` |
+| Postgres (pgvector) | Supabase | Project database connection string |
 | Redis | Render Key Value | `virtual-professor-redis` (private) |
-| Qdrant | Render private service | `virtual-professor-qdrant` |
-| Whisper STT | Render private service | `virtual-professor-whisper` (needs ~2 GB RAM) |
-| Kokoro TTS | Render private service | `virtual-professor-kokoro` (downloads models on first boot) |
 
-Do **not** proxy `/speak` or document uploads through Vercel — body limits are too small. The browser must call Render directly (`NEXT_PUBLIC_API_URL` = the API origin, no `/api` suffix).
+The browser calls the Render API directly (`NEXT_PUBLIC_API_URL` is baked into the frontend at **build time** via a Docker build arg pointing at the API origin). Do **not** proxy `/speak` or document uploads through the frontend — keep them hitting the API origin directly.
 
-### 1. Render (API + data + STT/TTS)
+### 1. Deploy the blueprint
 
-1. Push this branch to GitHub.
-2. In Render: **New → Blueprint** → select the repo. Render reads [`render.yaml`](./render.yaml).
-3. When prompted, set:
-   - `ZAI_API_KEY` — from [z.ai](https://z.ai)
-   - `CORS_ORIGINS` — `*` for the first boot, then your Vercel origin (`https://your-app.vercel.app`)
-4. Wait until `virtual-professor-api` is Live. Copy its `https://….onrender.com` URL.
-5. First Kokoro boot downloads ONNX voices onto the disk (several minutes).
+1. Create a Supabase project and enable the `vector` extension in SQL Editor.
+2. Copy its **Session pooler** connection string and convert it to
+   `postgresql+asyncpg://` for `DATABASE_URL`.
+3. Push this branch to GitHub.
+4. In Render: **New → Blueprint** → select the repo. Render reads
+   [`render.yaml`](./render.yaml).
+5. Set `DATABASE_URL`, `ZAI_API_KEY`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD`
+   in the API service environment.
+6. Wait until `virtual-professor-api` and
+   `virtual-professor-frontend` are Live.
+   - API: `https://virtual-professor-api.onrender.com/health`
+   - Frontend: `https://virtual-professor-frontend.onrender.com/`
 
-### 2. Vercel (frontend)
+### 2. CORS
 
-1. **Add New Project** → this repo.
-2. **Root Directory:** `services/frontend` (leave Framework as Next.js).
-3. Environment variable:
-   - `NEXT_PUBLIC_API_URL` = `https://virtual-professor-api.onrender.com` (no trailing slash, no `/api`)
-4. Deploy. Copy the `https://….vercel.app` URL.
+`render.yaml` pre-sets `CORS_ORIGINS=https://virtual-professor-frontend.onrender.com` on the API. If you rename the frontend service, update its `.onrender.com` origin and redeploy the API.
 
-### 3. Lock CORS
+### 3. Migrate and re-index knowledge
 
-Back on Render → `virtual-professor-api` → Environment:
+From a machine with the repository and Supabase `DATABASE_URL` configured:
 
+```powershell
+cd services/backend
+alembic upgrade head
 ```
-CORS_ORIGINS=https://your-app.vercel.app
-```
 
-Redeploy the API (or wait for a Blueprint sync). Trailing slashes are stripped automatically.
+The migration clears old vectors and changes the column to `VECTOR(384)`.
+Re-upload every professor document from the admin UI. The backend downloads
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` once and embeds documents locally.
 
-### 4. Re-index knowledge
-
-Embedding size is **1024** (`embedding-3`). Collections built with Ollama `nomic-embed-text` (768) will not search. Re-upload documents from the admin UI.
+Render Free services have ephemeral filesystems, so uploaded source files are
+temporary. The indexed chunks remain in Supabase; keep originals in a durable
+storage bucket if you need to re-upload them later.
 
 Default model is free `glm-4.7-flash`. Paid GLM-5: set `ZAI_LLM_MODEL=glm-5` on the API service.
 
 ### Local Docker still works
 
-`docker compose up` keeps nginx + `NEXT_PUBLIC_API_URL=/api` + `ROOT_PATH=/api`. That path is only for the all-in-one compose stack, not for Vercel.
+`docker compose up` keeps nginx + `NEXT_PUBLIC_API_URL=/api` + `ROOT_PATH=/api`. That path is only for the all-in-one compose stack, not for Render.
 
 ---
 
@@ -698,13 +694,13 @@ Default model is free `glm-4.7-flash`. Paid GLM-5: set `ZAI_LLM_MODEL=glm-5` on 
 | Layer | Technology |
 |---|---|
 | Avatar & WebRTC | LiveAvatar LITE |
-| Speech-to-Text | Whisper (local) |
+| Speech-to-Text | Browser Web Speech API (+ text fallback) |
 | LLM | Z.AI GLM (`glm-4.7-flash` free / `glm-5` paid) |
-| Embeddings | Z.AI `embedding-3` |
+| Embeddings | FastEmbed multilingual MiniLM (local, 384 dims) |
 | RAG Framework | LlamaIndex |
-| Vector Database | Qdrant |
+| Vector Database | PostgreSQL + pgvector |
 | Reranker | BGE cross-encoder (local) |
-| Text-to-Speech | Kokoro TTS |
+| Text-to-Speech | Edge-TTS (Microsoft neural voices) |
 | Backend | FastAPI (Python) |
 | Frontend | Next.js (TypeScript) |
 | Relational DB | PostgreSQL 16 |

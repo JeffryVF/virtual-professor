@@ -1,7 +1,7 @@
 """
 Async test fixtures for Virtual Professor API.
 
-External services (Z.AI, Qdrant, Redis, Whisper, Kokoro)
+External services (Z.AI, Redis) and the LLM/TTS/RAG pipelines
 are mocked to keep tests fast, deterministic, and dependency-free.
 """
 
@@ -15,12 +15,9 @@ from fastapi import FastAPI
 # ── Override settings BEFORE importing app modules ──────────────────────────
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test.db")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
-os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("ZAI_API_KEY", "test-zai-key")
 os.environ.setdefault("ZAI_LLM_MODEL", "glm-4.7-flash")
 os.environ.setdefault("ZAI_EMBED_MODEL", "embedding-3")
-os.environ.setdefault("WHISPER_URL", "http://localhost:9000")
-os.environ.setdefault("KOKORO_URL", "http://localhost:8880")
 os.environ.setdefault("DEBUG", "true")
 os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 os.environ.setdefault("SESSION_MEMORY_MESSAGES", "10")
@@ -166,22 +163,17 @@ async def test_professor(async_client, admin_headers) -> dict:
     Returns the full ProfessorResponse dict including ``id``, ``name``,
     ``collection``, etc.
     """
-    from unittest.mock import patch
-
-    # Mock Qdrant calls that might be triggered by professor creation
-    # (professor CRUD itself doesn't touch Qdrant, but some side effects might)
-    with patch("routers.admin.AsyncQdrantClient"):
-        response = await async_client.post(
-            "/admin/professors",
-            json={
-                "name": "API Test Professor",
-                "topic": "science",
-                "language": "es",
-                "avatar_id": "test-avatar",
-                "system_prompt": "You are a science professor.",
-            },
-            headers=admin_headers,
-        )
+    response = await async_client.post(
+        "/admin/professors",
+        json={
+            "name": "API Test Professor",
+            "topic": "science",
+            "language": "es",
+            "avatar_id": "test-avatar",
+            "system_prompt": "You are a science professor.",
+        },
+        headers=admin_headers,
+    )
     assert response.status_code == 201, f"Professor creation failed: {response.text}"
     return response.json()
 
@@ -198,10 +190,7 @@ async def test_document(async_client, admin_headers, test_professor) -> dict:
     """
     from unittest.mock import patch
 
-    with (
-        patch("routers.admin.ingest_document"),
-        patch("routers.admin.AsyncQdrantClient"),
-    ):
+    with patch("routers.admin.ingest_document"):
         response = await async_client.post(
             f"/admin/professors/{test_professor['id']}/documents",
             files={"file": ("test.pdf", b"%PDF-1.4 test content", "application/pdf")},

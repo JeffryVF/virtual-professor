@@ -1,12 +1,11 @@
 import logging
 
-from llama_index.core import StorageContext, VectorStoreIndex
-from llama_index.core.schema import NodeWithScore
-from llama_index.vector_stores.qdrant import QdrantVectorStore
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.http.exceptions import UnexpectedResponse
+from llama_index.core.schema import NodeWithScore, TextNode
+from sqlalchemy import select
 
 from core.config import settings
+from core.database import AsyncSessionLocal
+from models.db import DocumentChunk
 from models.schemas import ContextChunk
 from services import langfuse as langfuse_helpers
 from services.embeddings import get_embed_model
@@ -56,59 +55,54 @@ async def retrieve_context(
     query: str,
     professor_collection: str,
     top_k: int | None = None,
+    min_score: float | None = None,
     trace_id: str | None = None,
     trace: "LangfuseTrace | None" = None,
 ) -> list[ContextChunk]:
-    """Retrieve the top-k relevant chunks from the professor's Qdrant collection.
+    """Retrieve the top-k relevant chunks from the professor's pgvector store.
 
-    Retrieved nodes are filtered by ``settings.rag_min_relevance_score``.
-    Returns an empty list if no nodes meet the threshold.
+    Embeddings live in the ``document_chunks`` table; retrieval is a plain
+    cosine-similarity search over that table. Retrieved nodes are filtered by
+    ``min_score`` (default: ``settings.rag_min_relevance_score``). Returns an
+    empty list if nothing meets the threshold or the store errors.
     """
-    aclient = AsyncQdrantClient(
-        url=settings.qdrant_url,
-        timeout=30,
-    )
+    embed_model = get_embed_model()
+    query_embedding = embed_model.get_query_embedding(query)
+    limit = top_k or settings.rag_retrieval_top_k
+    relevance_floor = settings.rag_min_relevance_score if min_score is None else min_score
+
     try:
-        try:
-            collections = await aclient.get_collections()
-        except Exception as exc:
-            log.warning("Qdrant connection failed: %s", exc)
-            return []
-
-        existing = {collection.name for collection in collections.collections}
-        if professor_collection not in existing:
-            log.info(
-                "Collection %s not found in Qdrant, returning empty context",
-                professor_collection,
+        async with AsyncSessionLocal() as db:
+            distance = DocumentChunk.embedding.cosine_distance(query_embedding)
+            stmt = (
+                select(
+                    DocumentChunk,
+                    (1 - distance).label("score"),
+                )
+                .where(DocumentChunk.professor_collection == professor_collection)
+                .order_by(distance)
+                .limit(limit)
             )
-            return []
-
-        embed_model = get_embed_model()
-        vector_store = QdrantVectorStore(
-            collection_name=professor_collection,
-            aclient=aclient,
-        )
-        index = VectorStoreIndex.from_vector_store(
-            vector_store,
-            embed_model=embed_model,
-        )
-        retriever = index.as_retriever(
-            similarity_top_k=top_k or settings.rag_retrieval_top_k
-        )
-        nodes = await retriever.aretrieve(query)
-    except UnexpectedResponse as exc:
-        if getattr(exc, "status_code", None) == 404:
-            return []
-        log.warning("Qdrant unexpected response: %s", exc)
-        return []
+            rows = (await db.execute(stmt)).all()
     except Exception as exc:
-        log.warning("RAG retrieval error: %s", exc)
+        log.warning("pgvector retrieval error: %s", exc)
         return []
-    finally:
-        try:
-            await aclient.close()
-        except Exception:
-            pass
+
+    nodes: list[NodeWithScore] = []
+    for chunk, score in rows:
+        metadata = chunk.chunk_metadata or {}
+        document_id = str(chunk.document_id)
+        source_document = metadata.get("source_filename", "") or document_id
+        node = TextNode(
+            text=chunk.text,
+            metadata={
+                "document_id": document_id,
+                "professor_collection": chunk.professor_collection,
+                "source_filename": source_document,
+                "page_label": chunk.page_label,
+            },
+        )
+        nodes.append(NodeWithScore(node=node, score=float(score)))
 
     # ── Reranker step ────────────────────────────────────────────────────
     if settings.reranker_type != "none":
@@ -139,9 +133,9 @@ async def retrieve_context(
                 raise
 
     # Unconditional truncation to reranker_top_n (regardless of reranker status)
-    nodes = nodes[:settings.reranker_top_n]
+    nodes = nodes[: settings.reranker_top_n]
 
-    filtered = filter_nodes_by_score(nodes, settings.rag_min_relevance_score)
+    filtered = filter_nodes_by_score(nodes, relevance_floor)
     return [
         ContextChunk(
             text=node.get_content(),

@@ -27,10 +27,9 @@ x-security: &security
     - "no-new-privileges:true"
 
 # ── Resource limit presets ─────────────────────────────────────────────────
-#   light    – nginx, redis, kokoro, langfuse:         cpus 0.5, memory 512M
-#   medium   – backend, frontend:                       cpus 1,   memory 1G
-#   heavy    – postgres, qdrant:                        cpus 1,   memory 2G
-#   xheavy   – whisper:                                 cpus 2,   memory 4G
+#   light    – nginx, redis, langfuse:              cpus 0.5, memory 512M
+#   medium   – backend, frontend:                   cpus 1,   memory 1G
+#   heavy    – postgres:                            cpus 1,   memory 2G
 # ───────────────────────────────────────────────────────────────────────────
 
 x-light-limits: &light-limits
@@ -62,16 +61,6 @@ x-heavy-limits: &heavy-limits
       reservations:
         cpus: "0.25"
         memory: "512M"
-
-x-xheavy-limits: &xheavy-limits
-  deploy:
-    resources:
-      limits:
-        cpus: "2"
-        memory: "4G"
-      reservations:
-        cpus: "0.5"
-        memory: "1G"
 
 # ── Services ───────────────────────────────────────────────────────────────
 
@@ -114,48 +103,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      whisper:
-        condition: service_healthy
-      kokoro:
-        condition: service_healthy
-
-  whisper:
-    <<: [*xheavy-limits, *default-logging, *security]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-
-  qdrant:
-    <<: [*heavy-limits, *default-logging, *security]
-    restart: unless-stopped
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "curl",
-          "-f",
-          "http://localhost:6333/healthz",
-        ]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-
-  kokoro:
-    <<: [*light-limits, *default-logging, *security]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8880/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
 
   postgres:
     <<: [*heavy-limits, *default-logging, *security]

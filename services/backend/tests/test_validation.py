@@ -182,9 +182,7 @@ class TestPostParseValidation:
 
         with (
             patch("services.ingestion.AsyncSessionLocal", return_value=mock_session),
-            patch("services.ingestion.QdrantClient"),
             patch("services.ingestion.get_embed_model"),
-            patch("services.ingestion._ensure_collection", new=AsyncMock()),
             patch("services.ingestion._validate_document", return_value=(True, "")),
             patch("services.ingestion.SentenceSplitter.get_nodes_from_documents") as mock_splitter,
             patch.dict("services.ingestion._FORMAT_READERS", {"pdf": mock_reader_cls}),
@@ -232,9 +230,7 @@ class TestPostParseValidation:
 
         with (
             patch("services.ingestion.AsyncSessionLocal", return_value=mock_session),
-            patch("services.ingestion.QdrantClient"),
             patch("services.ingestion.get_embed_model"),
-            patch("services.ingestion._ensure_collection", new=AsyncMock()),
             patch("services.ingestion._validate_document", return_value=(True, "")),
             patch("services.ingestion.SentenceSplitter.get_nodes_from_documents") as mock_splitter,
             patch.dict("services.ingestion._FORMAT_READERS", {"pdf": mock_reader_cls}),
@@ -290,10 +286,6 @@ class TestUploadEndpoint:
 
         # These patches apply to ALL tests in this class
         self._patchers = [
-            patch("services.ingestion.QdrantClient"),
-            patch("services.ingestion.get_embed_model"),
-            patch("services.ingestion._ensure_collection", new=AsyncMock()),
-            patch("services.ingestion._transcribe_media", new=AsyncMock(return_value="")),
             # Mock ingest_document so the background task doesn't hit the real DB
             # with string UUIDs (the upload endpoint test validates pre-upload only)
             patch("routers.admin.ingest_document"),

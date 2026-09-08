@@ -21,7 +21,7 @@ async def test_health_endpoint(async_client):
     assert body["version"] == "0.1.0"
 
     services = body["services"]
-    assert set(services.keys()) == {"postgres", "redis", "qdrant", "zai", "kokoro", "whisper"}
+    assert set(services.keys()) == {"postgres", "redis", "zai"}
 
     for service_name, info in services.items():
         assert info["status"] in ("healthy", "unhealthy")
@@ -43,13 +43,19 @@ async def test_professors_list_empty(async_client):
 
 @pytest.mark.asyncio
 async def test_health_response_time(async_client):
-    """Health endpoint should respond in under 1s (5 concurrent failing probes)."""
+    """Health endpoint should respond well under the per-probe timeout.
+
+    The real Z.AI probe performs an HTTPS call (up to ``_SERVICE_TIMEOUT``=5s
+    in `routers/health.py`), so the wall-clock budget allows the concurrent
+    probes to complete without tripping their timeouts — a pathological
+    hang (or serialized probes summing past the budget) still fails.
+    """
     import time
 
     start = time.perf_counter()
     await async_client.get("/health")
     elapsed = (time.perf_counter() - start) * 1000
-    assert elapsed < 1000, f"Health check took {elapsed:.1f}ms — expected <1000ms"
+    assert elapsed < 6200, f"Health check took {elapsed:.1f}ms — expected <6200ms"
 
 
 # ── Healthy / degraded simulation ────────────────────────────────────────────
@@ -67,17 +73,14 @@ async def test_health_all_healthy(async_client):
     with (
         patch("routers.health._probe_postgres", new_callable=AsyncMock, return_value={"status": "healthy"}),
         patch("routers.health._probe_redis", new_callable=AsyncMock, return_value={"status": "healthy"}),
-        patch("routers.health._probe_qdrant", new_callable=AsyncMock, return_value={"status": "healthy"}),
         patch("routers.health._probe_zai", new_callable=AsyncMock, return_value={"status": "healthy"}),
-        patch("routers.health._probe_kokoro", new_callable=AsyncMock, return_value={"status": "healthy"}),
-        patch("routers.health._probe_whisper", new_callable=AsyncMock, return_value={"status": "healthy"}),
     ):
         response = await async_client.get("/health")
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "healthy"
-    for svc in ("postgres", "redis", "qdrant", "zai", "kokoro", "whisper"):
+    for svc in ("postgres", "redis", "zai"):
         assert body["services"][svc]["status"] == "healthy"
         assert "latency_ms" in body["services"][svc]
 
@@ -94,10 +97,7 @@ async def test_health_one_down(async_client):
         patch("routers.health._probe_postgres", new_callable=AsyncMock, return_value={"status": "healthy"}),
         # Redis probe raises → _run_probe catches and returns "unhealthy"
         patch("routers.health._probe_redis", new_callable=AsyncMock, side_effect=Exception("Redis connection refused")),
-        patch("routers.health._probe_qdrant", new_callable=AsyncMock, return_value={"status": "healthy"}),
         patch("routers.health._probe_zai", new_callable=AsyncMock, return_value={"status": "healthy"}),
-        patch("routers.health._probe_kokoro", new_callable=AsyncMock, return_value={"status": "healthy"}),
-        patch("routers.health._probe_whisper", new_callable=AsyncMock, return_value={"status": "healthy"}),
     ):
         response = await async_client.get("/health")
 

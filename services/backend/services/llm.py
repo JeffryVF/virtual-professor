@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import re
 
 import httpx
 
@@ -9,7 +11,12 @@ from services.memory import estimate_tokens
 log = logging.getLogger(__name__)
 
 
-GRACEFUL_NO_CONTEXT = "No encontré información sobre eso en mis fuentes"
+GRACEFUL_NO_CONTEXT_ES = "No encontré información sobre eso en mis fuentes"
+GRACEFUL_NO_CONTEXT_EN = "I couldn't find information about that in my sources."
+
+
+def graceful_no_context(language: str) -> str:
+    return GRACEFUL_NO_CONTEXT_ES if language == "es" else GRACEFUL_NO_CONTEXT_EN
 
 
 def _chat_url() -> str:
@@ -35,7 +42,12 @@ async def _chat_complete(
     max_tokens: int | None = None,
     timeout: float = 60,
 ) -> str:
-    """Call Z.AI chat completions with thinking disabled (voice-friendly)."""
+    """Call Z.AI chat completions with thinking disabled (voice-friendly).
+
+    Free-tier ``429 Too Many Requests`` is intermittent, so each configured
+    model is retried with short backoff, and if the primary model stays
+    rate-limited the request fails over to ``zai_fallback_llm_model``.
+    """
     payload = {
         "model": settings.zai_llm_model,
         "messages": messages,
@@ -44,10 +56,46 @@ async def _chat_complete(
         "temperature": 0.6,
         "stream": False,
     }
+
+    models = [settings.zai_llm_model]
+    if settings.zai_fallback_llm_model != settings.zai_llm_model:
+        models.append(settings.zai_fallback_llm_model)
+    max_attempts = 2
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(_chat_url(), json=payload, headers=_chat_headers())
-        response.raise_for_status()
-        return _extract_content(response.json())
+        for model in models:
+            for attempt in range(max_attempts):
+                response = await client.post(
+                    _chat_url(),
+                    json={**payload, "model": model},
+                    headers=_chat_headers(),
+                )
+                if response.status_code != 429:
+                    response.raise_for_status()
+                    return _extract_content(response.json())
+
+                if attempt < max_attempts - 1:
+                    delay = 2 ** attempt
+                    log.warning(
+                        "Z.AI rate limit (429) on %s, attempt %d/%d — retrying in ~%ds",
+                        model,
+                        attempt + 1,
+                        max_attempts,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                if model != models[-1]:
+                    log.warning(
+                        "Z.AI 429 exhausted on %s — failing over to %s",
+                        model,
+                        models[-1],
+                    )
+                    break
+                raise RuntimeError(
+                    f"Z.AI chat completions rate limit exhausted for {models}"
+                )
+    raise RuntimeError("Z.AI chat completions rate limit exhausted")
 
 
 async def generate_response(
@@ -55,7 +103,9 @@ async def generate_response(
     history: list[dict],
     context_chunks: list[ContextChunk],
     query: str,
+    language: str = "en",
     trace: "LangfuseTrace | None" = None,
+    low_relevance: bool = False,
 ) -> str:
     """Build a prompt with RAG context and conversation history, call Z.AI.
 
@@ -63,12 +113,16 @@ async def generate_response(
     ``source_document`` is non-empty.  If ``context_chunks`` is empty, returns
     a graceful message immediately without calling the LLM.
 
+    ``low_relevance=True`` signals the chunks are the closest available match
+    (relevance floor relaxed) — the professor should answer helpfully within
+    its topic instead of declining because no exact match was found.
+
     When ``trace`` is provided (Langfuse enabled), a child span is created
     with token counts and model name.
     """
     if not context_chunks:
         log.info("Empty context after RAG threshold filter — returning graceful message")
-        return GRACEFUL_NO_CONTEXT
+        return graceful_no_context(language)
 
     # Build labeled context
     labeled_chunks = []
@@ -99,12 +153,42 @@ async def generate_response(
         "puedes ampliar, pero por defecto sé breve."
     )
 
+    if low_relevance:
+        low_relevance_instruction = (
+            "The retrieved material below is the closest match available in "
+            "your sources, but it may only partially answer the question. "
+            "Answer helpfully within the professor's topic using it, and "
+            "guide the student toward what your sources do cover. Never "
+            "claim to have no information when the question falls within "
+            "the professor's subject. For greetings or general topic "
+            "questions, briefly present yourself and summarize what your "
+            "sources cover, then invite the student to ask a specific "
+            "question."
+        )
+    else:
+        low_relevance_instruction = ""
+
+    if language == "es":
+        language_instruction = (
+            "Responde SIEMPRE en español, sin mezclar inglés ni otros idiomas. "
+            "Usa un tono natural y cercano."
+        )
+    elif language == "en":
+        language_instruction = (
+            "Always respond in English only, without mixing Spanish or other languages. "
+            "Use a natural and friendly tone."
+        )
+    else:
+        language_instruction = ""
+
     system_content = (
         f"{system_prompt}\n\n"
         f"Use the following knowledge to answer the student's question. "
         f"If the answer is not in the knowledge, say you don't have that information.\n\n"
+        f"{language_instruction}\n\n"
         f"{citation_instruction}\n\n"
-        f"{conciseness_instruction}"
+        f"{conciseness_instruction}\n\n"
+        f"{low_relevance_instruction}"
     )
     messages = [
         {"role": "system", "content": system_content},
@@ -165,6 +249,19 @@ _DOMAIN_KEYWORDS: dict[str, frozenset[str]] = {
         "retorno", "return", "if", "else", "while", "for",
         "programar", "programando", "programador",
     }),
+    # Calculus / Mathematics (topics often stored in English: "Calculus")
+    "calculus": frozenset({
+        "cálculo", "calculo", "derivada", "derivadas", "derivar", "derivacion",
+        "derivación", "integral", "integrales", "integrar", "integración", "integracion",
+        "límite", "limite", "límites", "limites", "continuidad", "funcion", "función",
+        "funciones", "pendiente", "recta", "tangente", "tasa", "cambio", "matemáticas",
+        "matematicas", "matemática", "matematica", "cálculo diferencial",
+        "calculo diferencial", "cálculo integral", "calculo integral",
+        "optimización", "optimizacion", "máximos", "maximos", "mínimos", "minimos",
+        "derivative", "derivatives", "integral", "integrals", "limit", "limits",
+        "continuity", "function", "functions", "slope", "tangent", "rate of change",
+        "differentiation", "integration", "optimization", "maxima", "minima",
+    }),
 }
 
 
@@ -181,7 +278,8 @@ def _domain_related(query_lower: str, topic_lower: str) -> bool:
             # Query may be in-scope even without exact topic keyword if it contains
             # a related technical term
             related = _DOMAIN_KEYWORDS[topic_word]
-            query_words = set(query_lower.split())
+            # Strip punctuation so "calculo?" still matches "calculo"
+            query_words = set(re.sub(r"[^a-z0-9áéíóúñü\s]", "", query_lower).split())
             if query_words & related:
                 return True
     return False

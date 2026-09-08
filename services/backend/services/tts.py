@@ -1,129 +1,75 @@
 import io
 import logging
-import re
-import wave
 
-import httpx
+import edge_tts
 
 from core.config import settings
 
 log = logging.getLogger(__name__)
 
-# Default voices per language — override per-professor in future iterations
-_DEFAULT_VOICES = {
-    "en": "af_heart",
-    "es": "ef_dora",
-    "both": "af_heart",
-}
+_ES_ACCENTS = "áéíóúñÁÉÍÓÚÑ"
+
+_ES_STOPWORDS = frozenset({
+    "el", "la", "los", "las", "un", "una", "que", "es", "de", "y", "para",
+    "por", "con", "sobre", "hola", "qué", "como", "eres", "soy", "tema",
+})
+
+_EN_STOPWORDS = frozenset({
+    "the", "is", "of", "to", "and", "for", "what", "how", "are", "you",
+    "with", "hello", "can", "about", "teach", "topic",
+})
+
+
+def _strip_punct(token: str) -> str:
+    return "".join(ch for ch in token if ch.isalnum())
+
+
+def detect_language(text: str) -> str:
+    """Best-effort ES/EN detection for a short message."""
+    lowered = text.lower()
+    if any(ch in lowered for ch in _ES_ACCENTS):
+        return "es"
+    tokens = [_strip_punct(tok) for tok in lowered.split()]
+    es_count = sum(1 for tok in tokens if tok and tok in _ES_STOPWORDS)
+    en_count = sum(1 for tok in tokens if tok and tok in _EN_STOPWORDS)
+    return "es" if es_count >= en_count else "en"
+
+
+def resolve_language(language, text: str) -> str:
+    """Map a professor/student language value ('es'/'en'/'both') to 'es'/'en'.
+
+    Explicit 'es'/'en' are returned as-is; 'both' falls back to per-message
+    heuristic detection so the female Edge-TTS voice matches the language.
+    """
+    value = getattr(language, "value", language)
+    if value in ("es", "en"):
+        return value
+    return detect_language(text)
+
+
+def _voice_for(language: str, voice: str | None) -> str:
+    """Pick an Edge-TTS voice for the given language (ES/EN)."""
+    if voice:
+        return voice
+    if language == "es":
+        return settings.edge_tts_voice_es
+    if language == "en":
+        return settings.edge_tts_voice_en
+    return settings.edge_tts_voice_en
 
 
 async def synthesize(text: str, voice: str | None = None, language: str = "en") -> bytes:
-    """Send text to Kokoro TTS and return WAV audio bytes."""
-    payload = {
-        "text": text,
-        "voice": voice or _DEFAULT_VOICES.get(language, "af_heart"),
-        "language": "en-us" if language == "en" else "es",
-        "speed": 1.0,
-    }
-    async with httpx.AsyncClient(timeout=180) as client:
-        response = await client.post(f"{settings.kokoro_url}/tts", json=payload)
-        response.raise_for_status()
-        return response.content
-
-
-def _split_into_tts_chunks(text: str, max_chars: int = None) -> list[str]:
-    """Split text into sentence-aligned chunks, each <= *max_chars*.
-
-    Falls back to word-level splitting when a single sentence exceeds the limit.
-    """
-    if max_chars is None:
-        max_chars = settings.tts_chunk_max_chars
-    if not text or len(text) <= max_chars:
-        return [text] if text else []
-
-    # Split on sentence boundaries (. ! ? followed by space or end-of-string)
-    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
-
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-
-        if len(sentence) > max_chars:
-            # Flush current buffer first
-            if current:
-                chunks.append(" ".join(current))
-                current = []
-                current_len = 0
-
-            # Force-split this long sentence at word boundaries
-            words = sentence.split()
-            temp: list[str] = []
-            temp_len = 0
-            for word in words:
-                if temp_len + len(word) + 1 > max_chars and temp:
-                    chunks.append(" ".join(temp))
-                    temp = [word]
-                    temp_len = len(word)
-                else:
-                    temp.append(word)
-                    temp_len += len(word) + 1
-            if temp:
-                chunks.append(" ".join(temp))
-
-        elif current_len + len(sentence) + 1 > max_chars and current:
-            chunks.append(" ".join(current))
-            current = [sentence]
-            current_len = len(sentence)
-        else:
-            current.append(sentence)
-            current_len += len(sentence) + 1
-
-    if current:
-        chunks.append(" ".join(current))
-
-    return chunks
-
-
-def _merge_wavs(wav_chunks: list[bytes]) -> bytes:
-    """Merge multiple 16-bit mono WAV byte strings into a single WAV.
-
-    All chunks must share the same sample rate, bit depth, and channel count.
-    """
-    pcm_parts: list[bytes] = []
-    params: tuple[int, int, int, int, str, str] | None = None
-
-    for wav_bytes in wav_chunks:
-        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
-            frame_params = (wav.getnchannels(), wav.getsampwidth(), wav.getframerate())
-            if params is None:
-                params = (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), 0, "NONE", "not compressed")
-            else:
-                if frame_params != (params[0], params[1], params[2]):
-                    log.warning(
-                        "WAV format mismatch: expected %s, got %s — re-encoding first chunk",
-                        params[:3],
-                        frame_params,
-                    )
-                    # Re-sample everything to match first chunk via intermediate PCM
-                    # (In practice Kokoro always returns 24KHz 16-bit mono so this is defensive)
-                    params = (params[0], params[1], params[2], 0, "NONE", "not compressed")
-            pcm_parts.append(wav.readframes(wav.getnframes()))
-
-    if not pcm_parts:
-        raise ValueError("No PCM data to merge")
-
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as out:
-        out.setnchannels(params[0])
-        out.setsampwidth(params[1])
-        out.setframerate(params[2])
-        for part in pcm_parts:
-            out.writeframes(part)
-    return buf.getvalue()
+    """Synthesize *text* to MP3 bytes using Edge-TTS."""
+    voice_name = _voice_for(language, voice)
+    communicate = edge_tts.Communicate(text, voice_name, rate=settings.edge_tts_rate)
+    buffer = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buffer.write(chunk["data"])
+    data = buffer.getvalue()
+    if not data:
+        raise RuntimeError("Edge-TTS produced no audio data")
+    return data
 
 
 async def synthesize_chunked(
@@ -131,42 +77,17 @@ async def synthesize_chunked(
     voice: str | None = None,
     language: str = "en",
 ) -> bytes:
-    """Split *text* into sentence-aligned chunks, synthesize each, and merge.
+    """Synthesize *text*, truncating gracefully when it exceeds the total budget.
 
-    Falls back gracefully when individual chunks fail — as long as at least one
-    chunk succeeds the call returns valid WAV audio.
+    Edge-TTS handles long text in a single request, so the old WAV
+    split-and-merge pipeline is no longer needed. The full text is persisted
+    separately in the DB; only the audio copy is trimmed here.
     """
-    max_chars = settings.tts_chunk_max_chars
     max_total = settings.tts_max_total_chars
-
-    if len(text) <= max_chars:
-        return await synthesize(text, voice, language)
-
-    # Apply total-length guard before chunking
     if len(text) > max_total:
         log.info("Text exceeds TTS_MAX_TOTAL_CHARS (%d), truncating to %d", len(text), max_total)
         text = _truncate_at_sentence(text, max_total)
-
-    chunks = _split_into_tts_chunks(text, max_chars)
-    log.info("Splitting TTS text into %d chunks (%d chars total)", len(chunks), len(text))
-
-    wav_parts: list[bytes] = []
-    for i, chunk in enumerate(chunks):
-        try:
-            wav = await synthesize(chunk, voice, language)
-            wav_parts.append(wav)
-            log.debug("TTS chunk %d/%d OK (%d chars)", i + 1, len(chunks), len(chunk))
-        except Exception as exc:
-            log.warning("TTS chunk %d/%d failed (%d chars): %s", i + 1, len(chunks), len(chunk), exc)
-            continue
-
-    if not wav_parts:
-        raise RuntimeError("All TTS chunks failed — no audio produced")
-
-    if len(wav_parts) == 1:
-        return wav_parts[0]
-
-    return _merge_wavs(wav_parts)
+    return await synthesize(text, voice, language)
 
 
 def _truncate_at_sentence(text: str, max_chars: int) -> str:
@@ -175,8 +96,7 @@ def _truncate_at_sentence(text: str, max_chars: int) -> str:
         return text
 
     truncated = text[:max_chars].rstrip()
-    # Find last sentence-ending punctuation
-    match = re.search(r"[.!?]\s*$", truncated)
+    match = __import__("re").search(r"[.!?]\s*$", truncated)
     if match:
         return truncated
     # Fall back to last sentence boundary within the window

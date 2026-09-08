@@ -31,6 +31,7 @@ class TestMainLifespan:
 
         mock_conn = MagicMock()
         mock_conn.run_sync = AsyncMock()
+        mock_conn.execute = AsyncMock()
         mock_engine = MagicMock()
 
         @asynccontextmanager
@@ -62,6 +63,7 @@ class TestMainLifespan:
 
         mock_conn = MagicMock()
         mock_conn.run_sync = AsyncMock()
+        mock_conn.execute = AsyncMock()
         mock_engine = MagicMock()
 
         @asynccontextmanager

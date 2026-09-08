@@ -1,6 +1,4 @@
 import fitz
-import httpx
-from llama_index.core import StorageContext, VectorStoreIndex
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.readers.base import BaseReader
 from llama_index.readers.file import (
@@ -8,12 +6,10 @@ from llama_index.readers.file import (
     PDFReader,
     PptxReader,
 )
-from llama_index.vector_stores.qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
 
 from core.config import settings
 from core.database import AsyncSessionLocal
+from models.db import DocumentChunk
 from services.embeddings import get_embed_model
 
 CHUNK_SIZE = 512
@@ -33,7 +29,7 @@ def _validate_document(file_path: str, file_format: str, max_pages: int) -> tupl
       - Reject if password-protected
       - Reject if page count exceeds max_pages
       - Reject if no page has extractable text (scanned/image-only)
-    For other formats (docx, pptx, media, url): no PDF-specific checks.
+    For other formats (docx, pptx, txt): no PDF-specific checks.
 
     Returns (is_valid, error_message). On success, error_message is empty string.
     """
@@ -63,29 +59,6 @@ def _validate_document(file_path: str, file_format: str, max_pages: int) -> tupl
     # Non-PDF formats skip pre-ingestion PDF validation
     return (True, "")
 
-_MEDIA_FORMATS = {"mp3", "mp4", "wav", "ogg", "m4a"}
-
-
-async def _ensure_collection(client: QdrantClient, collection_name: str) -> None:
-    existing = {c.name for c in client.get_collections().collections}
-    if collection_name not in existing:
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(size=settings.embed_dim, distance=Distance.COSINE),
-        )
-
-
-async def _transcribe_media(file_path: str) -> str:
-    async with httpx.AsyncClient(timeout=300) as client:
-        with open(file_path, "rb") as f:
-            response = await client.post(
-                f"{settings.whisper_url}/asr",
-                files={"audio_file": f},
-                params={"task": "transcribe", "output": "txt"},
-            )
-        response.raise_for_status()
-        return response.text.strip()
-
 
 async def ingest_document(
     document_id: str,
@@ -93,8 +66,9 @@ async def ingest_document(
     file_path: str,
     file_format: str,
 ) -> None:
-    """Background task: parse, chunk, embed and store a document in Qdrant."""
-    from sqlalchemy import select
+    """Background task: parse, chunk, embed and store a document in pgvector."""
+    from sqlalchemy import delete, select
+    from sqlalchemy.ext.asyncio import AsyncSession
 
     from models.db import Document, DocumentStatus
 
@@ -114,19 +88,10 @@ async def ingest_document(
                 await db.commit()
                 return
 
-            qdrant = QdrantClient(url=settings.qdrant_url)
-            await _ensure_collection(qdrant, professor_collection)
-
             embed_model = get_embed_model()
 
             # Load and parse document
-            if file_format in _MEDIA_FORMATS:
-                # Transcribe audio/video with Whisper, then treat as plain text
-                from pathlib import Path
-                from llama_index.core import Document as LIDocument
-                text = await _transcribe_media(file_path)
-                documents = [LIDocument(text=text)]
-            elif file_format == "url":
+            if file_format == "url":
                 from pathlib import Path
                 from llama_index.readers.web import SimpleWebPageReader
                 url = Path(file_path).read_text().strip()
@@ -156,22 +121,36 @@ async def ingest_document(
             result = await db.execute(select(Document).where(Document.id == document_id))
             doc = result.scalar_one()
 
-            for node in nodes:
-                node.metadata["document_id"] = document_id
-                node.metadata["professor_collection"] = professor_collection
-                node.metadata["source_filename"] = doc.filename
+            # Embed all chunks in a single batch
+            embeddings = embed_model.get_text_embedding_batch(
+                [node.get_content() for node in nodes]
+            )
 
-            # Index into Qdrant
-            vector_store = QdrantVectorStore(client=qdrant, collection_name=professor_collection)
-            storage_context = StorageContext.from_defaults(vector_store=vector_store)
-            VectorStoreIndex(nodes, storage_context=storage_context, embed_model=embed_model)
+            # Replace any previous chunks for this document, then insert fresh rows
+            await db.execute(
+                delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
+            )
+            for idx, (node, embedding) in enumerate(zip(nodes, embeddings)):
+                db.add(
+                    DocumentChunk(
+                        document_id=document_id,
+                        professor_collection=professor_collection,
+                        chunk_index=idx,
+                        text=node.get_content(),
+                        embedding=embedding,
+                        page_label=node.metadata.get("page_label"),
+                        chunk_metadata={
+                            "document_id": document_id,
+                            "professor_collection": professor_collection,
+                            "source_filename": doc.filename,
+                        },
+                    )
+                )
 
             # Mark document as ready
             doc.status = DocumentStatus.ready
             doc.chunk_count = len(nodes)
             await db.commit()
-
-            qdrant.close()
 
         except Exception as exc:
             result = await db.execute(select(Document).where(Document.id == document_id))
@@ -183,23 +162,36 @@ async def ingest_document(
 
 
 async def delete_qdrant_collection(collection_name: str) -> None:
-    """Delete the entire Qdrant collection (used when removing a professor)."""
-    client = QdrantClient(url=settings.qdrant_url)
-    existing = {c.name for c in client.get_collections().collections}
-    if collection_name in existing:
-        client.delete_collection(collection_name=collection_name)
-    client.close()
+    """Delete every stored chunk for a professor collection (used when removing a professor).
+
+    Kept under a legacy name for call-site compatibility; there is no Qdrant anymore.
+    """
+    from sqlalchemy import delete, select
+
+    from models.db import Document, DocumentChunk, Professor
+
+    async with AsyncSessionLocal() as db:
+        prof_result = await db.execute(
+            select(Professor).where(Professor.collection == collection_name)
+        )
+        prof = prof_result.scalar_one_or_none()
+        if prof is not None:
+            doc_result = await db.execute(
+                select(Document.id).where(Document.professor_id == prof.id)
+            )
+            for (doc_id,) in doc_result.all():
+                await db.execute(
+                    delete(DocumentChunk).where(DocumentChunk.document_id == doc_id)
+                )
+        await db.commit()
 
 
 async def delete_document_chunks(professor_collection: str, document_id: str) -> None:
-    """Remove all Qdrant points that belong to a specific document."""
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
+    """Remove all stored chunks that belong to a specific document."""
+    from sqlalchemy import delete
 
-    client = QdrantClient(url=settings.qdrant_url)
-    client.delete(
-        collection_name=professor_collection,
-        points_selector=Filter(
-            must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
-        ),
-    )
-    client.close()
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
+        )
+        await db.commit()

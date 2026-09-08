@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter
-from qdrant_client import AsyncQdrantClient
 from redis.asyncio import Redis
 from sqlalchemy import text
 
@@ -45,16 +44,6 @@ async def _probe_redis() -> dict:
         await client.aclose()
 
 
-async def _probe_qdrant() -> dict:
-    """Check qdrant connectivity via get_collections()."""
-    client = AsyncQdrantClient(url=settings.qdrant_url, timeout=_SERVICE_TIMEOUT)
-    try:
-        await client.get_collections()
-        return {"status": "healthy"}
-    finally:
-        await client.close()
-
-
 async def _probe_zai() -> dict:
     """Check Z.AI connectivity via GET /models."""
     base = settings.zai_base_url.rstrip("/")
@@ -63,22 +52,6 @@ async def _probe_zai() -> dict:
             f"{base}/models",
             headers={"Authorization": f"Bearer {settings.zai_api_key}"},
         )
-        response.raise_for_status()
-    return {"status": "healthy"}
-
-
-async def _probe_kokoro() -> dict:
-    """Check kokoro TTS connectivity via GET /health."""
-    async with httpx.AsyncClient(timeout=_SERVICE_TIMEOUT) as client:
-        response = await client.get(f"{settings.kokoro_url}/health")
-        response.raise_for_status()
-    return {"status": "healthy"}
-
-
-async def _probe_whisper() -> dict:
-    """Check Whisper ASR connectivity via GET /docs (image has no /health)."""
-    async with httpx.AsyncClient(timeout=_SERVICE_TIMEOUT) as client:
-        response = await client.get(f"{settings.whisper_url.rstrip('/')}/docs")
         response.raise_for_status()
     return {"status": "healthy"}
 
@@ -117,10 +90,7 @@ async def health():
     raw = await asyncio.gather(
         _run_probe("postgres", _probe_postgres()),
         _run_probe("redis", _probe_redis()),
-        _run_probe("qdrant", _probe_qdrant()),
         _run_probe("zai", _probe_zai()),
-        _run_probe("kokoro", _probe_kokoro()),
-        _run_probe("whisper", _probe_whisper()),
     )
     services = dict(raw)
     all_healthy = all(s["status"] == "healthy" for s in services.values())

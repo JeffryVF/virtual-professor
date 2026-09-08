@@ -27,10 +27,7 @@ type FetchState =
 const serviceNameLabels: Record<string, string> = {
   postgres: 'PostgreSQL',
   redis: 'Redis',
-  qdrant: 'Qdrant',
   zai: 'Z.AI (GLM)',
-  kokoro: 'Kokoro (TTS)',
-  whisper: 'Whisper (STT)',
 }
 
 function StatusDot({ status }: { status: ServiceProbe['status'] }) {

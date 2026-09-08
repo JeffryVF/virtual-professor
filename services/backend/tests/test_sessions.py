@@ -10,10 +10,9 @@ When Langfuse is enabled, the /speak endpoint should create a root trace
 with professor/session/student metadata.
 """
 
-import io
 import json
 from uuid import UUID
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import pytest_asyncio
@@ -71,11 +70,9 @@ async def test_threshold_failure_creates_notification(
     with (
         patch("routers.sessions.rag") as mock_rag,
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
     ):
-        mock_stt.transcribe = AsyncMock(return_value="What is quantum physics?")
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(
             return_value="No encontré información sobre eso en mis fuentes"
@@ -85,10 +82,9 @@ async def test_threshold_failure_creates_notification(
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": "What is quantum physics?"},
         )
 
     # Verify response is OK
@@ -129,20 +125,17 @@ async def test_scope_failure_no_notification(
 
     with (
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
     ):
-        mock_stt.transcribe = AsyncMock(return_value="What is the weather?")
         mock_llm_module.is_in_scope = AsyncMock(return_value=False)
         mock_tts.synthesize_chunked = AsyncMock(return_value=b"audio data")
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": "What is the weather?"},
         )
 
     assert response.status_code == 200
@@ -185,11 +178,9 @@ async def test_speak_no_langfuse_errors_when_disabled(
     with (
         patch("routers.sessions.rag") as mock_rag,
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
     ):
-        mock_stt.transcribe = AsyncMock(return_value="What is biology?")
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(
             return_value="Biology is the study of life."
@@ -208,10 +199,9 @@ async def test_speak_no_langfuse_errors_when_disabled(
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": "What is biology?"},
         )
 
     assert response.status_code == 200
@@ -258,11 +248,9 @@ async def test_speak_sends_full_text_to_chunked_tts_when_within_limit(
     with (
         patch("routers.sessions.rag") as mock_rag,
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
     ):
-        mock_stt.transcribe = AsyncMock(return_value="Explain photosynthesis")
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(return_value=long_response)
         mock_rag.retrieve_context = AsyncMock(return_value=[])
@@ -270,10 +258,9 @@ async def test_speak_sends_full_text_to_chunked_tts_when_within_limit(
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": "Explain photosynthesis"},
         )
 
     assert response.status_code == 200
@@ -320,11 +307,9 @@ async def test_speak_truncates_tts_input_when_exceeds_max_total_chars(
     with (
         patch("routers.sessions.rag") as mock_rag,
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
     ):
-        mock_stt.transcribe = AsyncMock(return_value="Tell me everything")
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(return_value=long_response)
         mock_rag.retrieve_context = AsyncMock(return_value=[])
@@ -332,10 +317,9 @@ async def test_speak_truncates_tts_input_when_exceeds_max_total_chars(
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": "Tell me everything"},
         )
 
     assert response.status_code == 200
@@ -374,11 +358,9 @@ async def test_speak_returns_text_only_json_when_tts_fails(
     with (
         patch("routers.sessions.rag") as mock_rag,
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
     ):
-        mock_stt.transcribe = AsyncMock(return_value="Explain gravity")
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(return_value=response_text)
         mock_rag.retrieve_context = AsyncMock(return_value=[])
@@ -386,10 +368,9 @@ async def test_speak_returns_text_only_json_when_tts_fails(
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": "Explain gravity"},
         )
 
     assert response.status_code == 200
@@ -436,7 +417,6 @@ async def test_speak_creates_trace_when_langfuse_enabled(
     with (
         patch("routers.sessions.rag") as mock_rag,
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
         patch("routers.sessions.langfuse_helpers") as mock_lf,
@@ -445,7 +425,6 @@ async def test_speak_creates_trace_when_langfuse_enabled(
         mock_lf.create_span = mock_create_span_impl
         mock_lf.get_langfuse = MagicMock(return_value=MagicMock())
 
-        mock_stt.transcribe = AsyncMock(return_value="Tell me about cells")
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(
             return_value="Cells are the basic unit of life."
@@ -464,10 +443,9 @@ async def test_speak_creates_trace_when_langfuse_enabled(
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": "Tell me about cells"},
         )
 
     assert response.status_code == 200
@@ -485,29 +463,20 @@ async def test_speak_creates_trace_when_langfuse_enabled(
 
 
 @pytest.mark.asyncio
-async def test_speak_aborts_pipeline_when_stt_fails_with_langfuse_enabled(
+async def test_speak_empty_text_returns_fallback_without_pipeline(
     async_app, async_client, test_professor, db_session
 ):
-    """GIVEN STT raises during a traced speak request
-    WHEN the endpoint runs
-    THEN the failure is surfaced, later steps do not run, and the root trace ends.
+    """GIVEN an empty/blank transcript
+    WHEN /speak runs
+    THEN a graceful fallback phrase is returned, later steps do not run,
+    and the Langfuse root trace still ends.
     """
     mock_trace = MagicMock()
-    mock_trace.id = "trace-fail-1"
-    mock_span = MagicMock()
-
-    def mock_create_span_impl(trace, name, **kwargs):
-        from contextlib import asynccontextmanager
-
-        @asynccontextmanager
-        async def _span_cm():
-            yield mock_span
-
-        return _span_cm()
+    mock_trace.id = "trace-empty-1"
 
     student_resp = await async_client.post(
         "/sessions/students",
-        json={"name": "Fail Student", "email": "fail@test.com", "language": "es"},
+        json={"name": "Empty Student", "email": "empty@test.com", "language": "es"},
     )
     assert student_resp.status_code == 201
     student_id = student_resp.json()["id"]
@@ -522,33 +491,25 @@ async def test_speak_aborts_pipeline_when_stt_fails_with_langfuse_enabled(
     with (
         patch("routers.sessions.rag") as mock_rag,
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
         patch("routers.sessions.langfuse_helpers") as mock_lf,
         patch("core.config.settings.langfuse_enable", True),
     ):
         mock_lf.create_trace = AsyncMock(return_value=mock_trace)
-        mock_lf.create_span = mock_create_span_impl
-
-        mock_stt.transcribe = AsyncMock(side_effect=RuntimeError("stt offline"))
-        mock_llm_module.is_in_scope = AsyncMock()
-        mock_llm_module.generate_response = AsyncMock()
-        mock_rag.retrieve_context = AsyncMock()
-        mock_tts.synthesize_chunked = AsyncMock()
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
+        mock_tts.resolve_language = Mock(return_value="es")
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": ""},
         )
 
-    assert response.status_code == 503
-    assert "No se pudo capturar" in response.json()["detail"]
+    assert response.status_code == 200
+    assert "No pude entender" in response.json()["text"]
+    mock_llm_module.is_in_scope.assert_not_called()
     mock_rag.retrieve_context.assert_not_called()
-    mock_llm_module.generate_response.assert_not_called()
     mock_tts.synthesize_chunked.assert_not_called()
     mock_trace.end.assert_called_once()
 
@@ -583,11 +544,9 @@ async def test_speak_saves_sources_to_message(
     with (
         patch("routers.sessions.rag") as mock_rag,
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
     ):
-        mock_stt.transcribe = AsyncMock(return_value="What is biology?")
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(
             return_value="Biology is the study of life."
@@ -614,10 +573,9 @@ async def test_speak_saves_sources_to_message(
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": "What is biology?"},
         )
 
     assert response.status_code == 200
@@ -676,11 +634,9 @@ async def test_get_message_sources(
     with (
         patch("routers.sessions.rag") as mock_rag,
         patch("routers.sessions.llm") as mock_llm_module,
-        patch("routers.sessions.stt") as mock_stt,
         patch("routers.sessions.tts") as mock_tts,
         patch("routers.sessions.memory") as mock_memory,
     ):
-        mock_stt.transcribe = AsyncMock(return_value="Tell me about DNA")
         mock_llm_module.is_in_scope = AsyncMock(return_value=True)
         mock_llm_module.generate_response = AsyncMock(
             return_value="DNA is the molecule of heredity."
@@ -700,10 +656,9 @@ async def test_get_message_sources(
         mock_memory.get_history = AsyncMock(return_value=[])
         mock_memory.append_message = AsyncMock()
 
-        audio_file = io.BytesIO(b"fake audio bytes")
         response = await async_client.post(
             f"/sessions/{session_id}/speak",
-            files={"audio": ("test.wav", audio_file, "audio/wav")},
+            json={"text": "Tell me about DNA"},
         )
 
     assert response.status_code == 200

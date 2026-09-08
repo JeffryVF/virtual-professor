@@ -46,7 +46,7 @@ export default function AdminDocumentsPage() {
   const statusBadge = (col: CollectionStatus) => {
     if (col.last_error) return <Badge variant="destructive">Error</Badge>
     if (col.total_documents === 0) return <Badge variant="secondary">Sin documentos</Badge>
-    return col.qdrant_points > 0 ? <Badge variant="success">Indexado</Badge> : <Badge variant="warning">Pendiente</Badge>
+    return col.stored_chunks > 0 ? <Badge variant="success">Indexado</Badge> : <Badge variant="warning">Pendiente</Badge>
   }
 
   return (
@@ -178,7 +178,7 @@ export default function AdminDocumentsPage() {
                   <TableHead>Documentos</TableHead>
                   <TableHead>Estado</TableHead>
                   <TableHead>Chunks</TableHead>
-                  <TableHead>Qdrant Points</TableHead>
+                  <TableHead>En pgvector</TableHead>
                   <TableHead>Última indexación</TableHead>
                   <TableHead className="text-right">Acciones</TableHead>
                 </TableRow>
@@ -190,7 +190,7 @@ export default function AdminDocumentsPage() {
                     <TableCell>{col.total_documents}</TableCell>
                     <TableCell>{statusBadge(col)}</TableCell>
                     <TableCell>{col.total_chunks}</TableCell>
-                    <TableCell>{col.qdrant_points}</TableCell>
+                    <TableCell>{col.stored_chunks}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {col.last_indexed_at
                         ? new Date(col.last_indexed_at).toLocaleString()

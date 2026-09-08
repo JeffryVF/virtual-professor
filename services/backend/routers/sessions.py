@@ -3,15 +3,14 @@ import logging
 from datetime import datetime
 from uuid import UUID
 
-import httpx
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_db
-from models.db import Language, Message, MessageRole, Professor, Student, ThresholdNotification
+from models.db import Message, MessageRole, Professor, Student, ThresholdNotification
 from models.db import Session as DBSession
 from models.schemas import (
     ContextChunk,
@@ -20,30 +19,17 @@ from models.schemas import (
     MessageSourcesResponse,
     SessionCreate,
     SessionResponse,
+    SpeakRequest,
     StudentCreate,
     StudentResponse,
 )
 from services import langfuse as langfuse_helpers
-from services import llm, memory, rag, stt, tts
+from services import llm, memory, rag, tts
 
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Whisper expects standard language codes; map our enum values accordingly.
-_STT_LANGUAGE_MAP = {
-    "es": "es",
-    "en": "en",
-    "both": "es",  # default to Spanish when both are configured
-}
-
-
-def _map_stt_language(lang) -> str | None:
-    """Map a Professor.language value to a whisper language code, or None for auto-detect."""
-    if isinstance(lang, Language):
-        return _STT_LANGUAGE_MAP.get(lang.value)
-    return _STT_LANGUAGE_MAP.get(lang)
 
 
 def _truncate_text_for_tts(total_text: str) -> str:
@@ -100,7 +86,7 @@ async def create_session(data: SessionCreate, db: AsyncSession = Depends(get_db)
 @router.post("/{session_id}/speak")
 async def speak(
     session_id: UUID,
-    audio: UploadFile = File(...),
+    payload: SpeakRequest,
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -125,46 +111,29 @@ async def speak(
         )
 
         try:
-            # 1. STT — graceful fallback: 503 with Spanish message
-            audio_bytes = await audio.read()
-            async with langfuse_helpers.create_span(trace, "stt_transcribe") as span:
-                try:
-                    whisper_lang = _map_stt_language(professor.language)
-                    log.info("STT input: %d bytes, language=%s", len(audio_bytes), whisper_lang)
-                    transcript = await stt.transcribe(audio_bytes, language=whisper_lang)
-                    log.info("STT result: %r (empty=%s)", transcript.strip()[:100], not transcript.strip())
-                    if span is not None:
-                        span.update(
-                            input={"audio_bytes": len(audio_bytes)},
-                            output={"transcript": transcript},
-                        )
-                except httpx.HTTPStatusError as exc:
-                    if span is not None:
-                        span.update(level="ERROR", status_message=f"HTTP {exc.response.status_code}: {exc.response.text[:200]}")
-                    log.warning("STT service error (HTTP %s): %s", exc.response.status_code, exc.response.text[:200])
-                    raise HTTPException(
-                        status_code=503,
-                        detail=json.dumps({"detail": "No se pudo capturar el audio. Intenta de nuevo.", "step": "stt"}),
-                    )
-                except Exception as exc:
-                    if span is not None:
-                        span.update(level="ERROR", status_message=str(exc))
-                    log.warning("STT processing error: %s", exc)
-                    raise HTTPException(
-                        status_code=503,
-                        detail=json.dumps({"detail": "No se pudo capturar el audio. Intenta de nuevo.", "step": "stt"}),
-                    )
+            # 1. Transcript arrives from the browser (Web Speech API) or typed text
+            transcript = (payload.text or "").strip()
+            log.info("STT input (browser): %r (empty=%s)", transcript[:100], not transcript)
 
             # 2. Load conversation history from Redis
             history = await memory.get_history(str(session_id))
 
+            # Professor's target language: use it for fallback responses and
+            # to constrain the LLM + TTS voice. 'both' delegates per-message.
+            response_lang = tts.resolve_language(professor.language, transcript)
+
             # 3. Scope check — graceful fallback: default to in-scope on failure
             context_chunks: list = []
+            low_relevance = False
             if not transcript.strip():
-                response_text = (
-                    f"No pude entender tu audio. Intenta nuevamente sobre {professor.topic}. / "
-                    f"I couldn't understand the audio. Please try again about {professor.topic}."
-                )
+                if response_lang == "es":
+                    response_text = (
+                        f"No pude entender tu audio. Intenta nuevamente sobre {professor.topic}."
+                    )
+                else:
+                    response_text = (
+                        f"I couldn't understand the audio. Please try again about {professor.topic}."
+                    )
             else:
                 try:
                     in_scope = await llm.is_in_scope(transcript, professor.topic, trace=trace)
@@ -173,12 +142,16 @@ async def speak(
                     in_scope = True
 
                 if not in_scope:
-                    response_text = (
-                        f"Por favor realiza preguntas relacionadas con {professor.topic}. "
-                        f"Solo puedo ayudarte con ese tema. / "
-                        f"Please ask questions related to {professor.topic}. "
-                        f"I can only help with that subject."
-                    )
+                    if response_lang == "es":
+                        response_text = (
+                            f"Por favor realiza preguntas relacionadas con {professor.topic}. "
+                            f"Solo puedo ayudarte con ese tema."
+                        )
+                    else:
+                        response_text = (
+                            f"Please ask questions related to {professor.topic}. "
+                            f"I can only help with that subject."
+                        )
                 else:
                     # 4. RAG — graceful fallback: LLM-only with KB unavailable note
                     rag_failed = False
@@ -222,6 +195,22 @@ async def speak(
                         ))
                         await db.commit()
 
+                        # In-scope but nothing passed the relevance floor (e.g. tiny
+                        # knowledge base): re-retrieve the single best chunk with a
+                        # relaxed floor so the professor still answers grounded in its
+                        # real content instead of a generic "no info" dismissal.
+                        relaxed = await rag.retrieve_context(
+                            transcript,
+                            professor.collection,
+                            top_k=1,
+                            min_score=0.0,
+                            trace_id=getattr(trace, "id", None),
+                            trace=trace,
+                        )
+                        if relaxed:
+                            context_chunks = relaxed
+                            low_relevance = True
+
                     # 5. LLM — graceful fallback: 503 with Spanish message
                     try:
                         response_text = await llm.generate_response(
@@ -229,7 +218,9 @@ async def speak(
                             history=history,
                             context_chunks=context_chunks,
                             query=transcript,
+                            language=response_lang,
                             trace=trace,
+                            low_relevance=low_relevance,
                         )
                     except Exception as exc:
                         log.warning("LLM generation failed: %s", exc)
@@ -268,11 +259,19 @@ async def speak(
             await memory.append_message(str(session_id), "user", transcript)
             await memory.append_message(str(session_id), "assistant", response_text)
 
-            # 8. TTS — chunked synthesis with graceful fallback
+            # 8. TTS — Edge-TTS with graceful fallback.
+            # An empty transcript gets the text-only fallback (nothing to say aloud),
+            # so the browser can prompt the student again.
+            if not transcript.strip():
+                return {"text": response_text, "audio": None}
+
             speech_text = _truncate_text_for_tts(response_text)
             try:
                 async with langfuse_helpers.create_span(trace, "tts_synthesize") as span:
-                    audio_response = await tts.synthesize_chunked(speech_text)
+                    audio_response = await tts.synthesize_chunked(
+                        speech_text,
+                        language=tts.resolve_language(professor.language, transcript),
+                    )
                     if span is not None:
                         span.update(
                             input={"text_length": len(speech_text)},
@@ -282,7 +281,7 @@ async def speak(
                 log.warning("TTS synthesis failed, returning text-only: %s", exc)
                 return {"text": response_text, "audio": None}
 
-            return Response(content=audio_response, media_type="audio/wav")
+            return Response(content=audio_response, media_type="audio/mpeg")
         finally:
             if trace is not None:
                 trace.end()

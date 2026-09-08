@@ -93,7 +93,7 @@ export default function DocumentsPage() {
           type="file"
           multiple
           className="hidden"
-          accept=".pdf,.docx,.pptx,.txt,.mp3,.mp4,.wav,.csv,.json"
+          accept=".pdf,.docx,.pptx,.txt,.url"
           onChange={e => handleFiles(e.target.files)}
         />
         {uploading ? (

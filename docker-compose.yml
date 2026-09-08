@@ -38,12 +38,6 @@ services:
         condition: service_started
       redis:
         condition: service_started
-      qdrant:
-        condition: service_started
-      whisper:
-        condition: service_started
-      kokoro:
-        condition: service_started
     networks:
       - app-network
     restart: always
@@ -54,33 +48,8 @@ services:
       retries: 3
       start_period: 30s
 
-  whisper:
-    image: onerahmet/openai-whisper-asr-webservice:latest
-    environment:
-      - ASR_MODEL=base
-      - ASR_ENGINE=openai_whisper
-    networks:
-      - app-network
-    restart: always
-
-  qdrant:
-    image: qdrant/qdrant
-    volumes:
-      - qdrant_data:/qdrant/storage
-    networks:
-      - app-network
-    restart: always
-
-  kokoro:
-    build: ./services/kokoro
-    volumes:
-      - kokoro_models:/app/models
-    networks:
-      - app-network
-    restart: always
-
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -152,7 +121,5 @@ networks:
 
 volumes:
   postgres_data:
-  qdrant_data:
-  kokoro_models:
   uploads_data:
   langfuse_postgres_data:

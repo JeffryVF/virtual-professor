@@ -104,6 +104,13 @@ class SessionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SpeakRequest(BaseModel):
+    """Transcribed student input (browser SpeechRecognition or typed text)."""
+
+    text: str
+    language: str | None = None
+
+
 # ── RAG ───────────────────────────────────────────────────────────────────────
 
 class ContextChunk(BaseModel):
@@ -138,7 +145,7 @@ class MessageResponse(BaseModel):
 # ── Chunks ────────────────────────────────────────────────────────────────────
 
 class ChunkDetail(BaseModel):
-    """A single chunk from a document stored in Qdrant."""
+    """A single chunk from a document stored in pgvector."""
 
     chunk_index: int
     text: str
@@ -166,7 +173,7 @@ class CollectionStatus(BaseModel):
     total_documents: int
     documents_by_status: dict[str, int]
     total_chunks: int
-    qdrant_points: int
+    stored_chunks: int
     last_indexed_at: str | None = None
     last_error: str | None = None
 

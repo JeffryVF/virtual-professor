@@ -1,6 +1,6 @@
 'use client'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Mic, MicOff, Loader2, PhoneOff } from 'lucide-react'
+import { Mic, MicOff, Loader2, PhoneOff, Send } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -22,6 +22,15 @@ type Status = 'loading' | 'ready' | 'error' | 'audio-only'
 const SILENT_WAV_DATA_URI =
   'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQQAAAAAAA=='
 
+const SPEECH_RECOGNITION_SUPPORTED =
+  typeof window !== 'undefined' &&
+  ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)
+
+function getRecognitionClass(): any {
+  const win = window as unknown as Record<string, unknown>
+  return win.SpeechRecognition ?? win.webkitSpeechRecognition
+}
+
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message
   if (typeof err === 'object' && err !== null && 'detail' in err) {
@@ -36,19 +45,19 @@ function getErrorMessage(err: unknown): string {
 }
 
 export default function AvatarSession({ sessionId, onEnded }: Props) {
-  const recorderRef = useRef<MediaRecorder | null>(null)
-  const chunksRef = useRef<Blob[]>([])
   const statusRef = useRef<Status>('loading')
   const cancelledRef = useRef(false)
   const isConnectingRef = useRef(false)
-  const mediaStreamRef = useRef<MediaStream | null>(null)
   const avatarRef = useRef<TalkingHeadAvatarHandle | null>(null)
   const localAudioRef = useRef<HTMLAudioElement | null>(null)
+  const recognitionRef = useRef<any | null>(null)
+  const finalTranscriptRef = useRef('')
 
   const [status, setStatus] = useState<Status>('loading')
   const [recording, setRecording] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [speaking, setSpeaking] = useState(false)
+  const [textInput, setTextInput] = useState('')
   const [history, setHistory] = useState<Message[]>([])
   const historyRef = useRef<HTMLDivElement>(null)
 
@@ -67,8 +76,10 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
 
     return () => {
       cancelledRef.current = true
+      stopRecognition()
       cleanup()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, updateStatus])
 
   useEffect(() => {
@@ -88,7 +99,6 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
         updateStatus('ready')
       }
 
-      // Fetch conversation history after successful connect
       const msgs = await getSessionHistory(sessionId)
       setHistory(msgs)
     } catch (err) {
@@ -103,14 +113,9 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
 
   function cleanup() {
     try {
-      recorderRef.current?.stream.getTracks().forEach(track => track.stop())
-    } catch { /* stream may already be stopped */ }
-    recorderRef.current = null
-
-    try {
-      mediaStreamRef.current?.getTracks().forEach(track => track.stop())
-    } catch { /* stream may already be stopped */ }
-    mediaStreamRef.current = null
+      localAudioRef.current?.pause()
+    } catch { /* ignore */ }
+    recognitionRef.current = null
   }
 
   async function unlockLocalAudio() {
@@ -133,21 +138,21 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
     }
   }
 
-  async function getAudioDurationMs(wavBuffer: ArrayBuffer) {
+  async function getAudioDurationMs(audioBuffer: ArrayBuffer) {
     const audioContext = new AudioContext()
     try {
-      const decoded = await audioContext.decodeAudioData(wavBuffer.slice(0))
+      const decoded = await audioContext.decodeAudioData(audioBuffer.slice(0))
       return decoded.duration * 1000
     } finally {
       await audioContext.close()
     }
   }
 
-  async function playAudioLocally(wavBuffer: ArrayBuffer) {
+  async function playAudioLocally(audioBuffer: ArrayBuffer) {
     const audio = localAudioRef.current ?? new Audio()
     localAudioRef.current = audio
 
-    const objectUrl = URL.createObjectURL(new Blob([wavBuffer], { type: 'audio/wav' }))
+    const objectUrl = URL.createObjectURL(new Blob([audioBuffer], { type: 'audio/mpeg' }))
     audio.pause()
     audio.src = objectUrl
     audio.onended = () => {
@@ -163,62 +168,84 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
     await audio.play()
   }
 
-  async function startRecording() {
-    if (processing || (status !== 'ready' && status !== 'audio-only')) return
+  function stopRecognition() {
     try {
-      avatarRef.current?.unlockAudio().catch((error) => {
-        console.warn('Avatar audio unlock failed; playback may require another user gesture.', error)
-      })
-      unlockLocalAudio().catch((error) => {
-        console.warn('Local audio unlock failed; playback may require another user gesture.', error)
-      })
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      mediaStreamRef.current = stream
-      const recorder = new MediaRecorder(stream)
-      recorderRef.current = recorder
-      chunksRef.current = []
+      recognitionRef.current?.stop()
+    } catch { /* already stopped */ }
+  }
 
-      recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data) }
-      recorder.start()
+  function startRecording() {
+    if (processing || (statusRef.current !== 'ready' && statusRef.current !== 'audio-only')) return
+    if (!SPEECH_RECOGNITION_SUPPORTED) {
+      toast.error('El reconocimiento de voz no está disponible en este navegador. Usa el campo de texto.')
+      return
+    }
+
+    avatarRef.current?.unlockAudio().catch((error) => {
+      console.warn('Avatar audio unlock failed; playback may require another user gesture.', error)
+    })
+    unlockLocalAudio().catch((error) => {
+      console.warn('Local audio unlock failed; playback may require another user gesture.', error)
+    })
+
+    try {
+      const SR = getRecognitionClass()
+      const recognition = new SR()
+      recognitionRef.current = recognition
+      finalTranscriptRef.current = ''
+
+      recognition.lang = '' // browser default; supports both ES and EN teachers
+      recognition.interimResults = false
+      recognition.continuous = false
+      recognition.maxAlternatives = 1
+
+      recognition.onresult = (event: any) => {
+        let transcript = ''
+        for (let i = 0; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript
+        }
+        finalTranscriptRef.current = transcript
+      }
+
+      recognition.onerror = (event: any) => {
+        if (cancelledRef.current) return
+        if (event.error === 'no-speech') return
+        if (event.error === 'aborted') return
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          toast.error('Permiso de micrófono denegado. Usa el campo de texto.')
+        } else if (event.error === 'network') {
+          console.warn('Speech recognition network failure:', event.error)
+          setRecording(false)
+          recognitionRef.current = null
+          toast.error('No se pudo conectar con el servicio de voz. Usa el campo de texto para hacerme tu pregunta.')
+        } else {
+          console.warn('Speech recognition error:', event.error)
+        }
+      }
+
+      recognition.onend = () => {
+        recognitionRef.current = null
+        setRecording(false)
+        const transcript = finalTranscriptRef.current.trim()
+        if (transcript) void processTranscript(transcript)
+      }
+
+      recognition.start()
       setRecording(true)
     } catch (err) {
-      const message = err instanceof DOMException
-        ? (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError'
-          ? 'Permiso de cámara/micrófono falló'
-          : err.name === 'NotFoundError'
-            ? 'No se encontró cámara/micrófono'
-            : err.name === 'NotReadableError'
-              ? 'La cámara/micrófono está siendo usado por otra aplicación'
-              : 'Permiso de cámara/micrófono falló')
-        : 'Permiso de cámara/micrófono falló'
-      toast.error(message)
+      toast.error('No se pudo iniciar el reconocimiento de voz.')
+      console.error('SpeechRecognition start failed:', err)
     }
   }
 
-  function stopRecording() {
-    return new Promise<Blob>((resolve) => {
-      const recorder = recorderRef.current!
-      const mimeType = recorder.mimeType || 'audio/webm'
-      recorder.onstop = () => resolve(new Blob(chunksRef.current, { type: mimeType }))
-      recorder.stop()
-      recorder.stream.getTracks().forEach(t => t.stop())
-      mediaStreamRef.current = null
-    })
-  }
-
-  async function handlePushToTalkEnd() {
-    if (!recording) return
-    setRecording(false)
+  async function processTranscript(transcript: string) {
+    const clean = transcript.trim()
+    if (!clean) return
+    if (processing) return
 
     setProcessing(true)
     try {
-      const audioBlob = await stopRecording()
-      if (audioBlob.size < 1024) {
-        toast.error('Recording too short — please hold the mic button a bit longer.')
-        setProcessing(false)
-        return
-      }
-      const result = await speakInSession(sessionId, audioBlob)
+      const result = await speakInSession(sessionId, clean)
 
       const msgs = await getSessionHistory(sessionId)
       setHistory(msgs)
@@ -257,13 +284,23 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
     }
   }
 
+  function handleTextSubmit() {
+    const text = textInput.trim()
+    if (!text) return
+    setTextInput('')
+    void processTranscript(text)
+  }
+
   async function handleEndSession() {
     cancelledRef.current = true
     isConnectingRef.current = false
+    stopRecognition()
     cleanup()
     await endSession(sessionId)
     onEnded()
   }
+
+  const micDisabled = status === 'loading' || status === 'error' || processing
 
   return (
     <div className="flex h-full gap-6">
@@ -292,36 +329,42 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
         </div>
 
         <div className="flex items-center justify-center gap-4">
-          <button
-            onPointerDown={(event) => {
-              event.preventDefault()
-              void startRecording()
-            }}
-            onPointerUp={(event) => {
-              event.preventDefault()
-              void handlePushToTalkEnd()
-            }}
-            onPointerCancel={(event) => {
-              event.preventDefault()
-              if (recording) void handlePushToTalkEnd()
-            }}
-            disabled={status === 'loading' || status === 'error' || processing}
-            className={cn(
-              'w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-all select-none',
-              recording
-                ? 'bg-red-500 scale-110 shadow-red-300'
-                : processing
-                ? 'bg-muted text-muted-foreground'
-                : 'bg-primary text-primary-foreground hover:bg-primary/90 active:scale-95'
-            )}
-          >
-            {processing
-              ? <Loader2 className="h-7 w-7 animate-spin" />
-              : recording
-              ? <MicOff className="h-7 w-7 text-white" />
-              : <Mic className="h-7 w-7" />
-            }
-          </button>
+          {SPEECH_RECOGNITION_SUPPORTED ? (
+            <button
+              onPointerDown={(event) => {
+                event.preventDefault()
+                void startRecording()
+              }}
+              onPointerUp={(event) => {
+                event.preventDefault()
+                stopRecognition()
+              }}
+              onPointerCancel={(event) => {
+                event.preventDefault()
+                stopRecognition()
+              }}
+              disabled={micDisabled}
+              className={cn(
+                'w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-all select-none',
+                recording
+                  ? 'bg-red-500 scale-110 shadow-red-300'
+                  : processing
+                  ? 'bg-muted text-muted-foreground'
+                  : 'bg-primary text-primary-foreground hover:bg-primary/90 active:scale-95'
+              )}
+            >
+              {processing
+                ? <Loader2 className="h-7 w-7 animate-spin" />
+                : recording
+                ? <MicOff className="h-7 w-7 text-white" />
+                : <Mic className="h-7 w-7" />
+              }
+            </button>
+          ) : (
+            <div className="text-xs text-muted-foreground max-w-60 text-center">
+              Tu navegador no soporta reconocimiento de voz. Usa el campo de texto para hablar con el profesor.
+            </div>
+          )}
 
           <Button variant="outline" size="icon" className="h-10 w-10 rounded-full" onClick={handleEndSession}>
             <PhoneOff className="h-4 w-4 text-destructive" />
@@ -329,8 +372,28 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
         </div>
 
         <p className="text-center text-xs text-muted-foreground">
-          {recording ? 'Release to send' : processing ? 'Processing…' : 'Hold to speak'}
+          {recording ? 'Release to send' : processing ? 'Processing…' : speaking ? 'Speaking…' : 'Hold to speak'}
         </p>
+
+        <form
+          className="flex items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault()
+            handleTextSubmit()
+          }}
+        >
+          <input
+            type="text"
+            value={textInput}
+            onChange={(event) => setTextInput(event.target.value)}
+            placeholder="O escribe tu pregunta…"
+            disabled={processing || status === 'loading' || status === 'error'}
+            className="flex-1 rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+          <Button type="submit" size="icon" disabled={!textInput.trim() || processing} className="shrink-0">
+            <Send className="h-4 w-4" />
+          </Button>
+        </form>
       </div>
 
       <div className="w-72 shrink-0 flex flex-col bg-white rounded-xl border">

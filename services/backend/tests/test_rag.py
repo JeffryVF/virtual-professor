@@ -1,10 +1,11 @@
 """Tests for RAG relevance score filtering.
 
-Uses pure-function extraction to avoid mocking the full Qdrant pipeline.
+Uses pure-function extraction to avoid mocking the full pipeline.
 Tests the core filtering logic independently per Extract-Before-Mock rule.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from llama_index.core.schema import NodeWithScore, TextNode
@@ -41,6 +42,60 @@ class TestRagRetrieveScaleConfig:
 
 # Import must fail initially — ContextChunk doesn't exist yet (RED phase)
 from models.schemas import ContextChunk
+
+
+# ── Retrieval harness (pgvector) ────────────────────────────────────────────
+
+
+def _pgvector_patches(nodes: list[NodeWithScore]):
+    """Build patch targets so ``services.rag.retrieve_context`` reads *nodes*
+    from its mocked pgvector session.
+
+    ``services.rag.AsyncSessionLocal`` is patched to an async context manager
+    whose ``execute()`` returns rows of ``(chunk, score)`` derived from each
+    ``NodeWithScore`` (mimicking the ``document_chunks`` table rows).
+    """
+    embed_mock = MagicMock()
+    embed_mock.get_query_embedding.return_value = [0.0, 0.0]
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self, rows):
+            self._rows = rows
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, stmt):
+            return FakeResult(self._rows)
+
+    rows = [
+        (
+            SimpleNamespace(
+                text=node.get_content(),
+                chunk_metadata=node.metadata or {},
+                page_label=node.metadata.get("page_label"),
+                document_id=node.metadata.get("document_id", "doc-1"),
+                professor_collection="test_collection",
+            ),
+            node.score,
+        )
+        for node in nodes
+    ]
+
+    return (
+        patch("services.rag.get_embed_model", return_value=embed_mock),
+        patch("services.rag.AsyncSessionLocal", return_value=FakeSession(rows)),
+    )
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -173,39 +228,21 @@ class TestFilterNodesByScore:
 async def test_retrieve_context_applies_filter_integration():
     """Verify that retrieve_context applies the score filter end-to-end.
 
-    Mocks the Qdrant client and retriever, injects nodes with known scores,
+    Mocks the pgvector session, injects nodes with known scores,
     and verifies only qualifying nodes are returned as content strings.
     """
-    mock_retriever = MagicMock(spec=AsyncMock)
     nodes = [
         _make_node("high score chunk", 0.92),
         _make_node("low score chunk", 0.30),
     ]
-    mock_retriever.aretrieve = AsyncMock(return_value=nodes)
+    embed_patch, session_patch = _pgvector_patches(nodes)
 
-    mock_index = MagicMock()
-    mock_index.as_retriever.return_value = mock_retriever
-
-    mock_collections = MagicMock()
-    mock_col = MagicMock()
-    mock_col.name = "prof_collection"
-    mock_collections.collections = [mock_col]
-
-    with (
-        patch("services.rag.AsyncQdrantClient") as mock_qdrant_cls,
-        patch("services.rag.QdrantVectorStore") as mock_store_cls,
-        patch("services.rag.get_embed_model") as mock_embed_cls,
-        patch("services.rag.VectorStoreIndex.from_vector_store", return_value=mock_index),
-    ):
-        mock_client = MagicMock()
-        mock_client.get_collections = AsyncMock(return_value=mock_collections)
-        mock_qdrant_cls.return_value = mock_client
-
+    with embed_patch, session_patch:
         from services.rag import retrieve_context
 
         result = await retrieve_context(
             query="test query",
-            professor_collection="prof_collection",
+            professor_collection="test_collection",
             top_k=40,
         )
 
@@ -222,35 +259,15 @@ async def test_retrieve_context_applies_filter_integration():
 class TestRetrieveContextWithReranker:
     """Integration tests for reranker step in retrieve_context().
 
-    Each test patches the Qdrant pipeline to return controlled nodes, then
-    configures the reranker (via settings mocks or SentenceTransformerRerank
+    Each test patches the pgvector retrieval path to return controlled nodes,
+    then configures the reranker (via settings mocks or BGELocalReranker
     patch) to verify ordering, fallback, and top-k limiting.
     """
 
-    # ── Shared Qdrant mock helper ────────────────────────────────────────
-
-    _qdrant_patches = (
-        "services.rag.AsyncQdrantClient",
-        "services.rag.QdrantVectorStore",
-        "services.rag.get_embed_model",
-        "services.rag.VectorStoreIndex.from_vector_store",
-    )
-
     @staticmethod
-    def _make_retriever_mock(nodes: list[NodeWithScore]) -> MagicMock:
-        """Build a mock retriever that returns *nodes*."""
-        mock_retriever = MagicMock(spec=AsyncMock)
-        mock_retriever.aretrieve = AsyncMock(return_value=nodes)
-
-        mock_index = MagicMock()
-        mock_index.as_retriever.return_value = mock_retriever
-
-        mock_collections = MagicMock()
-        mock_col = MagicMock()
-        mock_col.name = "test_collection"
-        mock_collections.collections = [mock_col]
-
-        return mock_retriever, mock_index, mock_collections
+    def _make_retriever_mock(nodes: list[NodeWithScore]):
+        """Build the pgvector patchers that feed *nodes* into retrieve_context."""
+        return _pgvector_patches(nodes)
 
     # ── 3.1 RED / 3.2 GREEN: reranker enabled re-orders before threshold ─
 
@@ -265,15 +282,11 @@ class TestRetrieveContextWithReranker:
             _make_node("chunk B (originally second)", 0.9),
             _make_node("chunk C (originally third)", 0.5),
         ]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "bge"),
             patch.object(settings, "reranker_top_n", 5),
             patch(
@@ -283,12 +296,6 @@ class TestRetrieveContextWithReranker:
             mock_trace = MagicMock()
             mock_span = MagicMock()
             mock_trace.span.return_value = mock_span
-
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
 
             # Build a mock BGELocalReranker instance
             mock_reranker = MagicMock()
@@ -353,23 +360,13 @@ class TestRetrieveContextWithReranker:
             _make_node("second chunk", 0.9),
             _make_node("third chunk", 0.5),
         ]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -395,15 +392,11 @@ class TestRetrieveContextWithReranker:
             _make_node("stable A", 0.9),
             _make_node("stable B", 0.5),
         ]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "bge"),
             patch.object(settings, "reranker_top_n", 5),
             patch(
@@ -413,12 +406,6 @@ class TestRetrieveContextWithReranker:
             mock_trace = MagicMock()
             mock_span = MagicMock()
             mock_trace.span.return_value = mock_span
-
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
 
             # BGELocalReranker init raises
             mock_bge_cls.side_effect = OSError("Model not available")
@@ -458,27 +445,17 @@ class TestRetrieveContextWithReranker:
             _make_node("chunk 3", 0.7),
             _make_node("chunk 4", 0.6),
         ]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "bge"),
             patch.object(settings, "reranker_top_n", 2),
             patch(
                 "services.rag.BGELocalReranker"
             ) as mock_bge_cls,
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             mock_reranker = MagicMock()
             reranker_inputs = []
 
@@ -527,25 +504,15 @@ class TestRetrieveContextWithReranker:
 
         _reset_reranker()
         nodes = [_make_node(f"chunk {i}", 0.1 * (i + 1)) for i in range(8)]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "bge"),
             patch.object(settings, "reranker_top_n", 3),
             patch("services.rag.BGELocalReranker") as mock_bge_cls,
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             mock_reranker = MagicMock()
             reranker_inputs = []
 
@@ -577,24 +544,14 @@ class TestRetrieveContextWithReranker:
         WHEN retrieve_context THEN only first 3 nodes SHALL be returned
         (truncation is unconditional — applies even without reranker)."""
         nodes = [_make_node(f"node {i}", 0.9) for i in range(10)]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
             patch.object(settings, "reranker_top_n", 3),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -617,23 +574,13 @@ class TestRetrieveContextWithReranker:
         """GIVEN 3 nodes (rag_retrieval_top_k=3) AND reranker_top_n=6
         WHEN retrieve_context THEN all 3 pass through (no IndexError)."""
         nodes = [_make_node(f"node {i}", 0.9) for i in range(3)]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -658,24 +605,14 @@ class TestRetrieveContextWithReranker:
 
         _reset_reranker()
         nodes = [_make_node(f"node {i}", 0.1 * (i + 1)) for i in range(3)]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "bge"),
             patch("services.rag.BGELocalReranker") as mock_bge_cls,
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             mock_reranker = MagicMock()
             mock_reranker.rerank.return_value = [0, 1, 2]  # preserve order
             mock_bge_cls.return_value = mock_reranker
@@ -772,32 +709,14 @@ class TestContextChunkModel:
 class TestRetrieveContextTypedChunks:
     """Tests for retrieve_context returning list[ContextChunk] with metadata."""
 
-    _qdrant_patches = (
-        "services.rag.AsyncQdrantClient",
-        "services.rag.QdrantVectorStore",
-        "services.rag.get_embed_model",
-        "services.rag.VectorStoreIndex.from_vector_store",
-    )
-
     @staticmethod
-    def _make_retriever_mock(nodes: list[NodeWithScore]) -> tuple:
-        """Build a mock retriever that returns *nodes*."""
-        mock_retriever = MagicMock(spec=AsyncMock)
-        mock_retriever.aretrieve = AsyncMock(return_value=nodes)
-
-        mock_index = MagicMock()
-        mock_index.as_retriever.return_value = mock_retriever
-
-        mock_collections = MagicMock()
-        mock_col = MagicMock()
-        mock_col.name = "test_collection"
-        mock_collections.collections = [mock_col]
-
-        return mock_retriever, mock_index, mock_collections
+    def _make_retriever_mock(nodes: list[NodeWithScore]):
+        """Build the pgvector patchers that feed *nodes* into retrieve_context."""
+        return _pgvector_patches(nodes)
 
     @pytest.mark.asyncio
     async def test_retrieve_context_returns_list_of_contextchunk(self):
-        """GIVEN a query matching 3 Qdrant nodes with complete metadata
+        """GIVEN a query matching 3 stored chunks with complete metadata
         WHEN retrieve_context() is called
         THEN the return SHALL be list[ContextChunk] of length 3
         AND each chunk SHALL have source_document matching node's source_filename.
@@ -819,23 +738,13 @@ class TestRetrieveContextTypedChunks:
                 {"source_filename": "slides.pdf", "document_id": "uuid-3"},
             ),
         ]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -853,23 +762,13 @@ class TestRetrieveContextTypedChunks:
 
     @pytest.mark.asyncio
     async def test_empty_retrieval_returns_empty_list(self):
-        """GIVEN a query matching zero Qdrant nodes
+        """GIVEN a query matching zero stored chunks
         WHEN retrieve_context() is called
         THEN the return SHALL be [].
         """
-        # ── Qdrant collection does not exist → empty ────────────────────
-        mock_collections = MagicMock()
-        mock_collections.collections = []
+        embed_patch, session_patch = _pgvector_patches([])
 
-        with (
-            patch("services.rag.AsyncQdrantClient") as mock_qdrant_cls,
-        ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
+        with embed_patch, session_patch:
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -884,31 +783,13 @@ class TestRetrieveContextTypedChunks:
 class TestFallbackChain:
     """Tests for the source_filename → document_id → '' fallback chain."""
 
-    _qdrant_patches = (
-        "services.rag.AsyncQdrantClient",
-        "services.rag.QdrantVectorStore",
-        "services.rag.get_embed_model",
-        "services.rag.VectorStoreIndex.from_vector_store",
-    )
-
     @staticmethod
-    def _make_retriever_mock(nodes: list[NodeWithScore]) -> tuple:
-        mock_retriever = MagicMock(spec=AsyncMock)
-        mock_retriever.aretrieve = AsyncMock(return_value=nodes)
-
-        mock_index = MagicMock()
-        mock_index.as_retriever.return_value = mock_retriever
-
-        mock_collections = MagicMock()
-        mock_col = MagicMock()
-        mock_col.name = "test_collection"
-        mock_collections.collections = [mock_col]
-
-        return mock_retriever, mock_index, mock_collections
+    def _make_retriever_mock(nodes: list[NodeWithScore]):
+        return _pgvector_patches(nodes)
 
     @pytest.mark.asyncio
     async def test_source_filename_present_uses_it(self):
-        """GIVEN node with source_filename in payload
+        """GIVEN node with source_filename in metadata
         WHEN ContextChunk is built
         THEN source_document = source_filename.
         """
@@ -919,23 +800,13 @@ class TestFallbackChain:
                 {"source_filename": "report.pdf", "document_id": "uuid-1"},
             ),
         ]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -960,23 +831,13 @@ class TestFallbackChain:
                 {"document_id": "fallback-uuid-999"},
             ),
         ]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -989,10 +850,10 @@ class TestFallbackChain:
         assert result[0].source_document == "fallback-uuid-999"
 
     @pytest.mark.asyncio
-    async def test_no_metadata_falls_back_to_empty_string(self):
+    async def test_no_metadata_falls_back_to_document_id(self):
         """GIVEN node with neither source_filename nor document_id
         WHEN ContextChunk is built
-        THEN source_document = ''.
+        THEN source_document = the chunk's document UUID.
         """
         nodes = [
             _make_node_with_metadata(
@@ -1001,23 +862,15 @@ class TestFallbackChain:
                 {},
             ),
         ]
-        mock_retriever, mock_index, mock_collections = (
-            self._make_retriever_mock(nodes)
-        )
+        # Force the fallback UUID via the metadata used by the harness
+        nodes[0].node.metadata["document_id"] = "orphan-uuid"
+        embed_patch, session_patch = self._make_retriever_mock(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -1027,7 +880,7 @@ class TestFallbackChain:
             )
 
         assert len(result) == 1
-        assert result[0].source_document == ""
+        assert result[0].source_document == "orphan-uuid"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1038,13 +891,6 @@ class TestFallbackChain:
 class TestEmptyQueryHandling:
     """Tests for retrieve_context with empty or edge-case queries."""
 
-    _qdrant_patches = (
-        "services.rag.AsyncQdrantClient",
-        "services.rag.QdrantVectorStore",
-        "services.rag.get_embed_model",
-        "services.rag.VectorStoreIndex.from_vector_store",
-    )
-
     @pytest.mark.asyncio
     async def test_empty_query_returns_results(self):
         """GIVEN an empty query string
@@ -1052,30 +898,13 @@ class TestEmptyQueryHandling:
         THEN it SHALL not crash and return results (empty query passes through).
         """
         nodes = [_make_node("some content", 0.9)]
-        mock_retriever = MagicMock(spec=AsyncMock)
-        mock_retriever.aretrieve = AsyncMock(return_value=nodes)
-
-        mock_index = MagicMock()
-        mock_index.as_retriever.return_value = mock_retriever
-
-        mock_collections = MagicMock()
-        mock_col = MagicMock()
-        mock_col.name = "test_collection"
-        mock_collections.collections = [mock_col]
+        embed_patch, session_patch = _pgvector_patches(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -1091,33 +920,16 @@ class TestEmptyQueryHandling:
     async def test_whitespace_query_returns_results(self):
         """GIVEN a whitespace-only query string
         WHEN retrieve_context is called
-        THEN it SHALL not crash (query is passed to the retriever as-is).
+        THEN it SHALL not crash (query is passed to the embedder as-is).
         """
         nodes = [_make_node("whitespace result", 0.85)]
-        mock_retriever = MagicMock(spec=AsyncMock)
-        mock_retriever.aretrieve = AsyncMock(return_value=nodes)
-
-        mock_index = MagicMock()
-        mock_index.as_retriever.return_value = mock_retriever
-
-        mock_collections = MagicMock()
-        mock_col = MagicMock()
-        mock_col.name = "test_collection"
-        mock_collections.collections = [mock_col]
+        embed_patch, session_patch = _pgvector_patches(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(
@@ -1138,30 +950,13 @@ class TestEmptyQueryHandling:
         long_query = "test " * 500  # ~2500 chars
 
         nodes = [_make_node("long query handled", 0.9)]
-        mock_retriever = MagicMock(spec=AsyncMock)
-        mock_retriever.aretrieve = AsyncMock(return_value=nodes)
-
-        mock_index = MagicMock()
-        mock_index.as_retriever.return_value = mock_retriever
-
-        mock_collections = MagicMock()
-        mock_col = MagicMock()
-        mock_col.name = "test_collection"
-        mock_collections.collections = [mock_col]
+        embed_patch, session_patch = _pgvector_patches(nodes)
 
         with (
-            patch(self._qdrant_patches[0]) as mock_qdrant_cls,
-            patch(self._qdrant_patches[1]),
-            patch(self._qdrant_patches[2]),
-            patch(self._qdrant_patches[3], return_value=mock_index),
+            embed_patch,
+            session_patch,
             patch.object(settings, "reranker_type", "none"),
         ):
-            mock_client = MagicMock()
-            mock_client.get_collections = AsyncMock(
-                return_value=mock_collections
-            )
-            mock_qdrant_cls.return_value = mock_client
-
             from services.rag import retrieve_context  # noqa: PLC0415
 
             result = await retrieve_context(

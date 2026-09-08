@@ -23,9 +23,6 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str
 
-    # Qdrant
-    qdrant_url: str
-
     # Z.AI (GLM) — OpenAI-compatible API, no local LLM process
     # Docs: https://docs.z.ai/guides/llm/glm-5
     # Free models: glm-4.7-flash, glm-4.5-flash
@@ -33,20 +30,26 @@ class Settings(BaseSettings):
     zai_api_key: str = ""
     zai_base_url: str = "https://api.z.ai/api/paas/v4"
     zai_llm_model: str = "glm-4.7-flash"
-    zai_embed_model: str = "embedding-3"
-    embed_dim: int = 1024  # embedding-3 default; must match Qdrant collection size
+    zai_fallback_llm_model: str = "glm-4.5-flash"
+    # Local FastEmbed model: no API key or metered provider is required.
+    embed_provider: str = "fastembed"
+    embed_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    embed_dim: int = 384  # must match the pgvector column size
     llm_max_tokens: int = 350  # max tokens per LLM response (env: LLM_MAX_TOKENS)
 
-    # Whisper
-    whisper_url: str
-
-    # Kokoro TTS
-    kokoro_url: str
-    tts_chunk_max_chars: int = 700  # max chars per TTS chunk when splitting
+    # Edge-TTS — free neural TTS (Microsoft), no local model/service
+    edge_tts_voice_en: str = "en-US-JennyNeural"
+    edge_tts_voice_es: str = "es-ES-ElviraNeural"
+    edge_tts_rate: str = "+0%"
     tts_max_total_chars: int = 6000  # max total chars to synthesize — longer text is truncated gracefully
 
     # Admin
     admin_api_key: str
+
+    # Default admin user — seeded on startup if ADMIN_EMAIL/ADMIN_PASSWORD are set
+    admin_email: str = ""
+    admin_password: str = ""
+    admin_name: str = "Administrator"
 
     # JWT
     jwt_secret_key: str
@@ -69,12 +72,12 @@ class Settings(BaseSettings):
     reranker_device: str = "cpu"
 
     # Retrieval
-    rag_retrieval_top_k: int = 40  # env: RAG_RETRIEVAL_TOP_K (chunks to retrieve from Qdrant)
+    rag_retrieval_top_k: int = 40  # env: RAG_RETRIEVAL_TOP_K (chunks to retrieve from pgvector)
 
     # Upload validation
     upload_max_size_mb: int = 50
     upload_max_pages: int = 200
-    upload_allowed_formats: str = "pdf,docx,pptx,mp3,mp4,wav,ogg,m4a,url"
+    upload_allowed_formats: str = "pdf,docx,pptx,txt,url"
 
     # Professor document limits
     professor_max_documents: int = 100  # env: PROFESSOR_MAX_DOCUMENTS
@@ -165,6 +168,13 @@ class Settings(BaseSettings):
             warnings.append(
                 "ADMIN_API_KEY is set to a default value ('changeme'). "
                 "Generate a strong random secret for production."
+            )
+
+        # ── Default admin user (warning only — app still boots) ─────────────
+        if not self.admin_email or not self.admin_password:
+            warnings.append(
+                "ADMIN_EMAIL/ADMIN_PASSWORD are not set. "
+                "No default admin user will be seeded — set them to log in."
             )
 
         # ── CORS ────────────────────────────────────────────────────────────

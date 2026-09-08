@@ -166,7 +166,7 @@ export interface CollectionStatus {
   total_documents: number
   documents_by_status: Record<string, number>
   total_chunks: number
-  qdrant_points: number
+  stored_chunks: number
   last_indexed_at: string | null
   last_error: string | null
 }
@@ -234,12 +234,11 @@ export type SpeakResult =
   | { kind: 'audio'; buffer: ArrayBuffer }
   | { kind: 'text-only'; text: string }
 
-export async function speakInSession(sessionId: string, audio: Blob): Promise<SpeakResult> {
-  const form = new FormData()
-  form.append('audio', audio, 'recording')
+export async function speakInSession(sessionId: string, text: string): Promise<SpeakResult> {
   const res = await authFetch(`/sessions/${sessionId}/speak`, {
     method: 'POST',
-    body: form,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
   })
   if (!res.ok) throw await handleApiError(res)
 

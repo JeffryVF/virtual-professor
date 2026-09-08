@@ -56,15 +56,18 @@ def test_render_blueprint_declares_split_services():
     text = path.read_text(encoding="utf-8")
     for name in (
         "virtual-professor-api",
-        "virtual-professor-qdrant",
-        "virtual-professor-whisper",
-        "virtual-professor-kokoro",
+        "virtual-professor-frontend",
         "virtual-professor-redis",
-        "virtual-professor-db",
     ):
         assert name in text
     assert "healthCheckPath: /health" in text
     assert "glm-4.7-flash" in text
+    assert "EMBED_PROVIDER" in text
+    assert "fastembed" in text
+    assert "plan: free" in text
+    assert "DATABASE_URL" in text
+    assert "NEXT_PUBLIC_API_URL" in text
+    assert "dockerfilePath: ./services/frontend/Dockerfile.prod" in text
 
 
 def test_vercel_config_lives_in_frontend():

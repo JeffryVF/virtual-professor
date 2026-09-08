@@ -2,11 +2,13 @@ import enum
 import uuid
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from core.config import settings
 from core.database import Base
 
 
@@ -66,6 +68,7 @@ class Document(Base):
     uploaded_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
     professor: Mapped["Professor"] = relationship(back_populates="documents")
+    chunks: Mapped[list["DocumentChunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
 
 class Student(Base):
@@ -107,3 +110,27 @@ class Message(Base):
     timestamp: Mapped[datetime] = mapped_column(default=datetime.utcnow)
 
     session: Mapped["Session"] = relationship(back_populates="messages")
+
+
+class DocumentChunk(Base):
+    """A stored RAG chunk with its embedding (pgvector)."""
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        Index("ix_document_chunks_collection", "professor_collection"),
+        Index("ix_document_chunks_document", "document_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE")
+    )
+    professor_collection: Mapped[str] = mapped_column(String(100))
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    text: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float]] = mapped_column(Vector(settings.embed_dim))
+    page_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    chunk_metadata: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+    document: Mapped["Document"] = relationship(back_populates="chunks")

@@ -1,17 +1,39 @@
 """Integration tests for admin endpoints: document chunks, indexing status, and reindex."""
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
 
 from uuid import UUID
 
-from models.db import Document, DocumentStatus, Language, Professor
+from models.db import Document, DocumentChunk, DocumentStatus, Language, Professor
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def ready_doc_chunks(db_session, test_professor, test_document_ready):
+    """Insert ``n`` chunks pointing at the ready document (pgvector rows)."""
+    async def _add(n: int, text_factory=lambda i: f"Chunk {i} content here"):
+        chunks = []
+        for i in range(n):
+            chunks.append(
+                DocumentChunk(
+                    document_id=test_document_ready.id,
+                    professor_collection=test_professor.collection,
+                    chunk_index=i,
+                    text=text_factory(i),
+                    page_label=str(i + 1),
+                    embedding=[0.0] * 1024,
+                )
+            )
+        db_session.add_all(chunks)
+        await db_session.commit()
+        return chunks
+
+    return _add
 
 
 @pytest_asyncio.fixture
@@ -140,22 +162,14 @@ class TestGetDocumentChunks:
     async def test_chunks_empty_collection(
         self, async_client, admin_token, test_document_ready
     ):
-        """GIVEN a ready document with no Qdrant collection
+        """GIVEN a ready document with no stored chunks
         WHEN GET /admin/documents/{document_id}/chunks
         THEN returns empty chunks list.
         """
-        # Mock Qdrant client to return no collections
-        with patch("routers.admin.AsyncQdrantClient") as mock_qdrant_cls:
-            mock_client = MagicMock()
-            mock_collections = MagicMock()
-            mock_collections.collections = []
-            mock_client.get_collections = AsyncMock(return_value=mock_collections)
-            mock_qdrant_cls.return_value = mock_client
-
-            response = await async_client.get(
-                f"/admin/documents/{test_document_ready.id}/chunks",
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+        response = await async_client.get(
+            f"/admin/documents/{test_document_ready.id}/chunks",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -166,49 +180,18 @@ class TestGetDocumentChunks:
 
     @pytest.mark.asyncio
     async def test_chunks_with_points(
-        self, async_client, admin_token, test_document_ready
+        self, async_client, admin_token, test_document_ready, ready_doc_chunks
     ):
-        """GIVEN a ready document with Qdrant points
+        """GIVEN a ready document with stored pgvector chunks
         WHEN GET /admin/documents/{document_id}/chunks
         THEN returns paginated chunks with correct fields.
         """
-        mock_points = []
-        for i in range(3):
-            point = MagicMock()
-            point.payload = {
-                "document_id": str(test_document_ready.id),
-                "_node_content": json.dumps({"text": f"Chunk {i} content here"}),
-                "page_label": str(i + 1),
-            }
-            mock_points.append(point)
+        await ready_doc_chunks(3)
 
-        mock_collection_info = MagicMock()
-        mock_collection_info.name = "test_collection"
-
-        with patch("routers.admin.AsyncQdrantClient") as mock_qdrant_cls:
-            mock_client = MagicMock()
-
-            # get_collections returns existing collection
-            mock_collections = MagicMock()
-            mock_col = MagicMock()
-            mock_col.name = "test_collection"
-            mock_collections.collections = [mock_col]
-            mock_client.get_collections = AsyncMock(return_value=mock_collections)
-
-            # count returns 3
-            mock_count = MagicMock()
-            mock_count.count = 3
-            mock_client.count = AsyncMock(return_value=mock_count)
-
-            # scroll returns points
-            mock_client.scroll = AsyncMock(return_value=(mock_points, None))
-
-            mock_qdrant_cls.return_value = mock_client
-
-            response = await async_client.get(
-                f"/admin/documents/{test_document_ready.id}/chunks",
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+        response = await async_client.get(
+            f"/admin/documents/{test_document_ready.id}/chunks",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -222,36 +205,18 @@ class TestGetDocumentChunks:
 
     @pytest.mark.asyncio
     async def test_chunks_truncation(
-        self, async_client, admin_token, test_document_ready
+        self, async_client, admin_token, test_document_ready, ready_doc_chunks
     ):
         """GIVEN the full=false query param (default)
         WHEN text exceeds 500 characters
         THEN text SHALL be truncated to 500 chars.
         """
-        long_text = "A" * 1000
-        point = MagicMock()
-        point.payload = {
-            "document_id": str(test_document_ready.id),
-            "_node_content": json.dumps({"text": long_text}),
-        }
+        await ready_doc_chunks(1, text_factory=lambda i: "A" * 1000)
 
-        with patch("routers.admin.AsyncQdrantClient") as mock_qdrant_cls:
-            mock_client = MagicMock()
-            mock_collections = MagicMock()
-            mock_col = MagicMock()
-            mock_col.name = "test_collection"
-            mock_collections.collections = [mock_col]
-            mock_client.get_collections = AsyncMock(return_value=mock_collections)
-            mock_count = MagicMock()
-            mock_count.count = 1
-            mock_client.count = AsyncMock(return_value=mock_count)
-            mock_client.scroll = AsyncMock(return_value=([point], None))
-            mock_qdrant_cls.return_value = mock_client
-
-            response = await async_client.get(
-                f"/admin/documents/{test_document_ready.id}/chunks",
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+        response = await async_client.get(
+            f"/admin/documents/{test_document_ready.id}/chunks",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
 
         assert response.status_code == 200
         chunk = response.json()["chunks"][0]
@@ -259,37 +224,19 @@ class TestGetDocumentChunks:
 
     @pytest.mark.asyncio
     async def test_chunks_full_text(
-        self, async_client, admin_token, test_document_ready
+        self, async_client, admin_token, test_document_ready, ready_doc_chunks
     ):
         """GIVEN the full=true query param
         WHEN text exceeds 500 characters
         THEN text SHALL NOT be truncated.
         """
-        long_text = "A" * 1000
-        point = MagicMock()
-        point.payload = {
-            "document_id": str(test_document_ready.id),
-            "_node_content": json.dumps({"text": long_text}),
-        }
+        await ready_doc_chunks(1, text_factory=lambda i: "A" * 1000)
 
-        with patch("routers.admin.AsyncQdrantClient") as mock_qdrant_cls:
-            mock_client = MagicMock()
-            mock_collections = MagicMock()
-            mock_col = MagicMock()
-            mock_col.name = "test_collection"
-            mock_collections.collections = [mock_col]
-            mock_client.get_collections = AsyncMock(return_value=mock_collections)
-            mock_count = MagicMock()
-            mock_count.count = 1
-            mock_client.count = AsyncMock(return_value=mock_count)
-            mock_client.scroll = AsyncMock(return_value=([point], None))
-            mock_qdrant_cls.return_value = mock_client
-
-            response = await async_client.get(
-                f"/admin/documents/{test_document_ready.id}/chunks",
-                params={"full": "true"},
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+        response = await async_client.get(
+            f"/admin/documents/{test_document_ready.id}/chunks",
+            params={"full": "true"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
 
         assert response.status_code == 200
         chunk = response.json()["chunks"][0]
@@ -297,47 +244,27 @@ class TestGetDocumentChunks:
 
     @pytest.mark.asyncio
     async def test_chunks_pagination(
-        self, async_client, admin_token, test_document_ready
+        self, async_client, admin_token, test_document_ready, ready_doc_chunks
     ):
-        """GIVEN offset=1&limit=2 with 4 total points
+        """GIVEN offset=1&limit=2 with 4 total chunks
         WHEN GET /admin/documents/{document_id}/chunks
         THEN returns 2 chunks starting from index 1.
         """
-        points = []
-        for i in range(4):
-            point = MagicMock()
-            point.payload = {
-                "document_id": str(test_document_ready.id),
-                "_node_content": json.dumps({"text": f"Chunk {i}"}),
-            }
-            points.append(point)
+        await ready_doc_chunks(4)
 
-        with patch("routers.admin.AsyncQdrantClient") as mock_qdrant_cls:
-            mock_client = MagicMock()
-            mock_collections = MagicMock()
-            mock_col = MagicMock()
-            mock_col.name = "test_collection"
-            mock_collections.collections = [mock_col]
-            mock_client.get_collections = AsyncMock(return_value=mock_collections)
-            mock_count = MagicMock()
-            mock_count.count = 4
-            mock_client.count = AsyncMock(return_value=mock_count)
-            mock_client.scroll = AsyncMock(return_value=(points, None))
-            mock_qdrant_cls.return_value = mock_client
-
-            response = await async_client.get(
-                f"/admin/documents/{test_document_ready.id}/chunks",
-                params={"offset": "1", "limit": "2"},
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+        response = await async_client.get(
+            f"/admin/documents/{test_document_ready.id}/chunks",
+            params={"offset": "1", "limit": "2"},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
 
         assert response.status_code == 200
         body = response.json()
         assert len(body["chunks"]) == 2
         assert body["chunks"][0]["chunk_index"] == 1
-        assert body["chunks"][0]["text"] == "Chunk 1"
+        assert body["chunks"][0]["text"] == "Chunk 1 content here"
         assert body["chunks"][1]["chunk_index"] == 2
-        assert body["chunks"][1]["text"] == "Chunk 2"
+        assert body["chunks"][1]["text"] == "Chunk 2 content here"
 
     @pytest.mark.asyncio
     async def test_chunks_limit_max_200(
@@ -388,17 +315,10 @@ class TestGetIndexingStatus:
         WHEN GET /admin/indexing/status
         THEN returns collection with zero counts.
         """
-        with patch("routers.admin.AsyncQdrantClient") as mock_qdrant_cls:
-            mock_client = MagicMock()
-            mock_collections = MagicMock()
-            mock_collections.collections = []
-            mock_client.get_collections = AsyncMock(return_value=mock_collections)
-            mock_qdrant_cls.return_value = mock_client
-
-            response = await async_client.get(
-                "/admin/indexing/status",
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+        response = await async_client.get(
+            "/admin/indexing/status",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -409,38 +329,26 @@ class TestGetIndexingStatus:
         assert col["total_documents"] == 0
         assert col["documents_by_status"] == {}
         assert col["total_chunks"] == 0
-        assert col["qdrant_points"] == 0
+        assert col["stored_chunks"] == 0
         assert col["last_indexed_at"] is None
         assert col["last_error"] is None
 
     @pytest.mark.asyncio
     async def test_indexing_status_with_docs(
         self, async_client, admin_token, test_professor,
-        test_document_ready, test_document_pending, test_document_error
+        test_document_ready, test_document_pending, test_document_error,
+        ready_doc_chunks,
     ):
         """GIVEN a professor with documents in various states
         WHEN GET /admin/indexing/status
         THEN returns correct counts and status breakdown.
         """
-        with patch("routers.admin.AsyncQdrantClient") as mock_qdrant_cls:
-            mock_client = MagicMock()
+        await ready_doc_chunks(3)
 
-            mock_collections = MagicMock()
-            mock_col = MagicMock()
-            mock_col.name = "test_collection"
-            mock_collections.collections = [mock_col]
-            mock_client.get_collections = AsyncMock(return_value=mock_collections)
-
-            mock_collection_info = MagicMock()
-            mock_collection_info.points_count = 10
-            mock_client.get_collection = AsyncMock(return_value=mock_collection_info)
-
-            mock_qdrant_cls.return_value = mock_client
-
-            response = await async_client.get(
-                "/admin/indexing/status",
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+        response = await async_client.get(
+            "/admin/indexing/status",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -452,7 +360,7 @@ class TestGetIndexingStatus:
         assert col["documents_by_status"]["pending"] == 1
         assert col["documents_by_status"]["error"] == 1
         assert col["total_chunks"] == 5  # only ready doc has chunk_count=5
-        assert col["qdrant_points"] == 10
+        assert col["stored_chunks"] == 3  # rows actually in pgvector for this collection
         assert col["last_indexed_at"] is not None  # ready doc has uploaded_at
         assert col["last_error"] == "Something went wrong"
 
@@ -463,29 +371,21 @@ class TestGetIndexingStatus:
         assert summary["collections_with_errors"] == 1
 
     @pytest.mark.asyncio
-    async def test_indexing_status_qdrant_collection_missing(
+    async def test_indexing_status_stored_chunks_empty(
         self, async_client, admin_token, test_professor, test_document_ready
     ):
-        """GIVEN a professor whose Qdrant collection does not exist yet
+        """GIVEN a professor whose collection has no stored chunks yet
         WHEN GET /admin/indexing/status
-        THEN qdrant_points SHALL be 0 (no error).
+        THEN stored_chunks SHALL be 0 (no error).
         """
-        with patch("routers.admin.AsyncQdrantClient") as mock_qdrant_cls:
-            mock_client = MagicMock()
-            mock_collections = MagicMock()
-            mock_collections.collections = []  # no collections exist
-            mock_client.get_collections = AsyncMock(return_value=mock_collections)
-            # get_collection should never be called
-            mock_qdrant_cls.return_value = mock_client
-
-            response = await async_client.get(
-                "/admin/indexing/status",
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+        response = await async_client.get(
+            "/admin/indexing/status",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
 
         assert response.status_code == 200
         col = response.json()["collections"][0]
-        assert col["qdrant_points"] == 0
+        assert col["stored_chunks"] == 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════

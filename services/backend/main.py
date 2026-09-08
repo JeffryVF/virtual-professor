@@ -52,8 +52,19 @@ async def lifespan(app: FastAPI):
         log.info("Debug mode — skipping production config validation")
 
     # ── Create tables ───────────────────────────────────────────────────────
+    from sqlalchemy import text
+
     async with engine.begin() as conn:
+        # pgvector must exist before the document_chunks table is created
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
+
+    # ── Seed default admin user ─────────────────────────────────────────────
+    from core.database import AsyncSessionLocal
+    from services.seed import seed_default_admin
+
+    async with AsyncSessionLocal() as session:
+        await seed_default_admin(session)
 
     # ── Langfuse init ───────────────────────────────────────────────────────
     langfuse_service.init_langfuse()
