@@ -29,6 +29,22 @@ interface LoginResponse {
   user: AuthUser
 }
 
+async function fetchWithRetry(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const delays = [0, 500, 1500]
+  let lastError: unknown
+
+  for (const delay of delays) {
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
+    try {
+      return await fetch(input, init)
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('No se pudo conectar con el servidor.')
+}
+
 async function authError(res: Response, fallback: string): Promise<Error> {
   const body = await res.json().catch(() => null)
   const detail = body?.detail
@@ -71,7 +87,7 @@ export function clearTokens(): void {
 // ── API calls ─────────────────────────────────────────────────────────────────
 
 export async function login(credentials: LoginCredentials): Promise<{ user: AuthUser; tokens: TokenPair }> {
-  const res = await fetch(`${API_BASE}/auth/login`, {
+  const res = await fetchWithRetry(`${API_BASE}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(credentials),
@@ -88,7 +104,7 @@ export async function login(credentials: LoginCredentials): Promise<{ user: Auth
 }
 
 export async function register(data: { email: string; password: string; name: string }): Promise<AuthUser> {
-  const res = await fetch(`${API_BASE}/auth/register`, {
+  const res = await fetchWithRetry(`${API_BASE}/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -103,7 +119,7 @@ export async function refreshTokens(): Promise<TokenPair | null> {
   const refreshToken = getRefreshToken()
   if (!refreshToken) return null
 
-  const res = await fetch(`${API_BASE}/auth/refresh`, {
+  const res = await fetchWithRetry(`${API_BASE}/auth/refresh`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh_token: refreshToken }),
@@ -122,7 +138,7 @@ export async function fetchMe(): Promise<AuthUser | null> {
   if (!token) return null
 
   const doFetch = (bearer: string) =>
-    fetch(`${API_BASE}/auth/me`, { headers: { Authorization: `Bearer ${bearer}` } })
+    fetchWithRetry(`${API_BASE}/auth/me`, { headers: { Authorization: `Bearer ${bearer}` } })
 
   let res = await doFetch(token)
 
