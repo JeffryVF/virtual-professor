@@ -90,7 +90,11 @@ class Settings(BaseSettings):
     langfuse_release: str = "0.1.0"
 
     # CORS — JSON array, comma-separated, or "*" for development
-    cors_origins: list[str] = ["*"]
+    cors_origins: list[str] = [
+        "https://virtual-professor-frontend.onrender.com",
+        "http://localhost:3000",
+        "http://localhost:3001",
+    ]
 
     @field_validator("database_url", mode="before")
     @classmethod

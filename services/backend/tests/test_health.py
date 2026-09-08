@@ -120,3 +120,17 @@ async def test_health_no_auth_required(async_client):
     assert response.status_code == 200
     # Verify it's a proper health response, not an auth error
     assert "status" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_cors_allows_deployed_frontend(async_client):
+    """The deployed frontend origin SHALL receive a CORS response header."""
+    response = await async_client.get(
+        "/health",
+        headers={"Origin": "https://virtual-professor-frontend.onrender.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == (
+        "https://virtual-professor-frontend.onrender.com"
+    )
