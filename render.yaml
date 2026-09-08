@@ -64,7 +64,7 @@ services:
       - key: ADMIN_NAME
         value: Administrator
       - key: CORS_ORIGINS
-        value: https://virtual-professor-frontend.onrender.com
+        value: '["https://virtual-professor-frontend.onrender.com"]'
       - key: RAG_MIN_RELEVANCE_SCORE
         value: "0.20"
       - key: RERANKER_TYPE
