@@ -19,6 +19,10 @@ const AVATAR_BASELINE = {
 }
 
 const ALWAYS_MORPHS = [
+  'eyeBlinkLeft',
+  'eyeBlinkRight',
+  'browDownLeft',
+  'browDownRight',
   'eyeLookInLeft',
   'eyeLookOutLeft',
   'eyeLookInRight',
