@@ -355,7 +355,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
             lightSpotDispersion: 0.8,
           })
 
-          head.opt.modelRoot = 'Human'
+          head.opt.modelRoot = 'Armature'
           head.lipsync.en = new LipsyncEn()
 
           await head.showAvatar(
