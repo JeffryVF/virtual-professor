@@ -1,0 +1,6 @@
+# Don't commit dev secrets.
+.dev.vars
+.wrangler
+node_modules
+dist
+test-results

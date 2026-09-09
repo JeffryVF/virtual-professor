@@ -5,7 +5,6 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
-  useMemo,
   useRef,
   useState,
 } from 'react'
@@ -181,15 +180,6 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
     const [subtitle, setSubtitle] = useState('')
     const [initError, setInitError] = useState<string | null>(null)
 
-    const webglOk = useMemo(() => {
-      try {
-        const canvas = document.createElement('canvas')
-        return !!(canvas.getContext('webgl') || canvas.getContext('webgl2'))
-      } catch {
-        return false
-      }
-    }, [])
-
     useEffect(() => {
       onUnavailableRef.current = onUnavailable
       onSpeakingChangeRef.current = onSpeakingChange
@@ -331,14 +321,6 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
     )
 
     useEffect(() => {
-      if (!webglOk) {
-        const reason = '3D rendering unavailable — audio-only mode active'
-        setIsReady(false)
-        setInitError(reason)
-        onUnavailableRef.current?.(reason)
-        return
-      }
-
       let cancelled = false
 
       async function init() {
@@ -373,7 +355,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
             lightSpotDispersion: 0.8,
           })
 
-          head.opt.modelRoot = 'Armature'
+          head.opt.modelRoot = 'Human'
           head.lipsync.en = new LipsyncEn()
 
           await head.showAvatar(
@@ -406,6 +388,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Avatar failed to load'
           if (cancelled) return
+          console.error('[avatar] failed to initialize:', error)
           setIsReady(false)
           setInitError(message)
           onUnavailableRef.current?.(message)
@@ -434,7 +417,7 @@ const TalkingHeadAvatar = forwardRef<TalkingHeadAvatarHandle, TalkingHeadAvatarP
         headRef.current?.dispose()
         headRef.current = null
       }
-    }, [stopSpeech, webglOk])
+    }, [stopSpeech])
 
     if (initError) {
       return (

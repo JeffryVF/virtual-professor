@@ -1,0 +1,52 @@
+# Test-only config for @cloudflare/vitest-pool-workers.
+# Mirrors wrangler.toml WITHOUT the [ai] binding (workerd crashes on it in the pool)
+# and with relative paths resolved from inside test/.
+name = "virtual-professor-api-test"
+main = "../src/index.ts"
+compatibility_date = "2024-09-25"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "virtual-professor-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../migrations"
+
+[[r2_buckets]]
+binding = "UPLOADS"
+bucket_name = "virtual-professor-uploads"
+
+[vars]
+DEBUG = "false"
+ZAI_BASE_URL = "https://api.z.ai/api/paas/v4"
+ZAI_LLM_MODEL = "glm-4.7-flash"
+ZAI_FALLBACK_LLM_MODEL = "glm-4.5-flash"
+LLM_MAX_TOKENS = "350"
+JWT_ALGORITHM = "HS256"
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = "30"
+JWT_REFRESH_TOKEN_EXPIRE_DAYS = "7"
+ADMIN_NAME = "Test Administrator"
+RAG_MIN_RELEVANCE_SCORE = "0.4"
+RAG_RETRIEVAL_TOP_K = "8"
+UPLOAD_MAX_SIZE_MB = "4"
+UPLOAD_MAX_PAGES = "400"
+UPLOAD_ALLOWED_FORMATS = "pdf,docx,pptx,txt,url"
+PROFESSOR_MAX_DOCUMENTS = "100"
+SESSION_MEMORY_MESSAGES = "10"
+SESSION_MEMORY_MAX_TOKENS = "4096"
+SESSION_TIMEOUT_MINUTES = "30"
+EDGE_TTS_VOICE_EN = "en-US-JennyNeural"
+EDGE_TTS_VOICE_ES = "es-ES-ElviraNeural"
+EDGE_TTS_RATE = "+0%"
+TTS_MAX_TOTAL_CHARS = "6000"
+CORS_ORIGINS = "[\"https://virtual-professor.test\"]"
+
+# Non-secret stand-ins so isConfigured()/providers keep working behind fetch mocks.
+CLOUDFLARE_ACCOUNT_ID = "test-account-id"
+CLOUDFLARE_API_TOKEN = "test-cloudflare-token"
+CLOUDFLARE_AI_SEARCH_INSTANCE = "test-instance"
+ZAI_API_KEY = "test-zai-key"
+JWT_SECRET_KEY = "test-jwt-secret"
+ADMIN_API_KEY = "test-admin-key"
+ADMIN_EMAIL = "admin@test.com"
+ADMIN_PASSWORD = "adminpass123"

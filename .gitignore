@@ -1,5 +1,13 @@
 # ── Environment ────────────────────────────────────────────────
 .env
+.dev.vars
+
+# ── OpenNext / Cloudflare build output ─────────────────────────
+.open-next/
+**/.wrangler/
+api/dist-check/
+services/frontend/avatars/
+wrangler-dev.log
 
 # ── Docker data volumes (persistent storage) ──────────────────
 data/

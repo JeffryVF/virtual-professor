@@ -247,34 +247,40 @@ export default function AvatarSession({ sessionId, onEnded }: Props) {
     try {
       const result = await speakInSession(sessionId, clean)
 
-      const msgs = await getSessionHistory(sessionId)
-      setHistory(msgs)
-      const latestProfessorMessage = [...msgs]
-        .reverse()
-        .find((message) => message.role === 'professor' || message.role === 'assistant')
-      const speechText = latestProfessorMessage?.content ?? ''
-
       if (result.kind === 'audio') {
         void playAudioLocally(result.buffer).catch((error) => {
           console.error('Failed to play spoken response.', error)
           toast.error('No se pudo reproducir la respuesta de audio.')
         })
 
-        if (statusRef.current === 'ready') {
-          if (speechText) {
-            void avatarRef.current?.playSpeech({ audioBuffer: result.buffer.slice(0), text: speechText })
-              .catch((error) => {
-                console.warn('Avatar lip-sync animation failed.', error)
+        void getSessionHistory(sessionId).then((msgs) => {
+          setHistory(msgs)
+          const latestProfessorMessage = [...msgs]
+            .reverse()
+            .find((message) => message.role === 'professor' || message.role === 'assistant')
+          const speechText = latestProfessorMessage?.content ?? ''
+
+          if (statusRef.current === 'ready') {
+            if (speechText) {
+              void avatarRef.current?.playSpeech({ audioBuffer: result.buffer.slice(0), text: speechText })
+                .catch((error) => {
+                  console.warn('Avatar lip-sync animation failed.', error)
+                })
+            } else {
+              void getAudioDurationMs(result.buffer).then((durationMs) => {
+                avatarRef.current?.animateMouth(durationMs)
+              }).catch((error) => {
+                console.warn('Avatar mouth animation failed.', error)
               })
-          } else {
-            void getAudioDurationMs(result.buffer).then((durationMs) => {
-              avatarRef.current?.animateMouth(durationMs)
-            }).catch((error) => {
-              console.warn('Avatar mouth animation failed.', error)
-            })
+            }
           }
-        }
+        }).catch((error) => {
+          console.warn('Failed to refresh session history:', error)
+        })
       } else if (result.kind === 'text-only') {
+        void getSessionHistory(sessionId).then(setHistory).catch((error) => {
+          console.warn('Failed to refresh session history:', error)
+        })
         toast.warning('Audio was unavailable. The full answer is in the conversation.')
       }
     } catch (err) {
