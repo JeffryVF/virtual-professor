@@ -27,7 +27,7 @@ type FetchState =
 const serviceNameLabels: Record<string, string> = {
   postgres: 'PostgreSQL',
   redis: 'Redis',
-  zai: 'Z.AI (GLM)',
+  gemini: 'Google Gemini',
 }
 
 function StatusDot({ status }: { status: ServiceProbe['status'] }) {

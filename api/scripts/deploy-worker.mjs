@@ -28,7 +28,7 @@ const SECRET_NAMES = [
   'CLOUDFLARE_ACCOUNT_ID',
   'CLOUDFLARE_API_TOKEN',
   'CLOUDFLARE_AI_SEARCH_INSTANCE',
-  'ZAI_API_KEY',
+  'GEMINI_API_KEY',
   'JWT_SECRET_KEY',
   'ADMIN_API_KEY',
   'ADMIN_EMAIL',
@@ -198,7 +198,7 @@ async function main() {
   const accountId = value('CLOUDFLARE_ACCOUNT_ID')
   const token = value('CLOUDFLARE_API_TOKEN')
 
-  for (const key of ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_AI_SEARCH_INSTANCE', 'ZAI_API_KEY', 'JWT_SECRET_KEY', 'ADMIN_EMAIL']) {
+  for (const key of ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_AI_SEARCH_INSTANCE', 'GEMINI_API_KEY', 'JWT_SECRET_KEY', 'ADMIN_EMAIL']) {
     if (!value(key)) die(`Missing ${key} in .env or environment`)
   }
   if (!token) {

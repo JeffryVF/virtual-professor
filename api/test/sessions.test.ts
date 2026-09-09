@@ -6,7 +6,7 @@ vi.mock('../src/services/tts', () => ({
   synthesize: vi.fn(async () => ({ audio: new Uint8Array([0x49, 0x44, 0x33, 0x04]), ok: true })),
 }))
 
-const zaiAnswer = 'La inteligencia artificial es el campo que estudia sistemas capaces de simular la inteligencia humana.'
+const geminiAnswer = 'La inteligencia artificial es el campo que estudia sistemas capaces de simular la inteligencia humana.'
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -16,7 +16,7 @@ function searchChunk(collection: string): Record<string, unknown> {
   return {
     item: { key: `${collection}/doc-1/doc.pdf`, metadata: { filename: 'doc.pdf', document_id: 'doc-1' } },
     score: 0.95,
-    text: zaiAnswer,
+    text: geminiAnswer,
   }
 }
 
@@ -32,8 +32,8 @@ function stubGlobalFetch(collection: string): void {
       if (path.endsWith('/items')) {
         return jsonResponse({ success: true, result: { items: [] } })
       }
-      if (u.hostname.endsWith('z.ai')) {
-        return jsonResponse({ choices: [{ message: { content: zaiAnswer } }] })
+      if (u.hostname === 'generativelanguage.googleapis.com') {
+        return jsonResponse({ choices: [{ message: { content: geminiAnswer } }] })
       }
       return jsonResponse({ success: true, result: { id: 'test-instance' } })
     }),

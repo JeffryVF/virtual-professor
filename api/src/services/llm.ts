@@ -14,7 +14,7 @@ export interface ProfessorLike {
   system_prompt: string
 }
 
-const ZAI_BASE_DEFAULT = 'https://api.z.ai/api/paas/v4'
+const GEMINI_BASE_DEFAULT = 'https://generativelanguage.googleapis.com/v1beta/openai'
 
 interface ChatResponse {
   choices?: { message?: { content?: string } }[]
@@ -25,15 +25,14 @@ async function chatCompletion(
   messages: { role: string; content: string }[],
   options: { model?: string; maxTokens?: number; temperature?: number; timeoutMs?: number } = {},
 ): Promise<string> {
-  const base = (env.ZAI_BASE_URL || ZAI_BASE_DEFAULT).replace(/\/$/, '')
+  const base = (env.GEMINI_BASE_URL || GEMINI_BASE_DEFAULT).replace(/\/$/, '')
   const url = `${base}/chat/completions`
-  const models = [options.model ?? env.ZAI_LLM_MODEL, env.ZAI_FALLBACK_LLM_MODEL]
+  const models = [options.model ?? env.GEMINI_LLM_MODEL, env.GEMINI_FALLBACK_LLM_MODEL]
     .filter((m, i, arr) => m && arr.indexOf(m) === i)
   const maxTokens = options.maxTokens ?? int(env, 'LLM_MAX_TOKENS', 350)
   const body = {
     model: models[0],
     messages,
-    thinking: { type: 'disabled' },
     max_tokens: maxTokens,
     temperature: options.temperature ?? 0.6,
     stream: false,
@@ -47,7 +46,7 @@ async function chatCompletion(
       const response = await fetch(url, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${env.ZAI_API_KEY}`,
+          Authorization: `Bearer ${env.GEMINI_API_KEY}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
@@ -58,13 +57,17 @@ async function chatCompletion(
         await new Promise((resolve) => setTimeout(resolve, delayMs))
         continue
       }
-      if (!response.ok) throw new Error(`Z.AI request failed (${response.status})`)
+      if (!response.ok) {
+        const errBody = await response.text().catch(() => 'unable to read body')
+        console.error(`Gemini ${response.status}: ${errBody}`)
+        throw new Error(`Gemini request failed (${response.status}): ${errBody.slice(0, 200)}`)
+      }
       const data = (await response.json()) as ChatResponse
       const content = data.choices?.[0]?.message?.content?.trim() ?? ''
       return content
     }
   }
-  throw new Error('Z.AI exhausted retries (429)')
+  throw new Error('Gemini exhausted retries (429)')
 }
 
 function languageInstruction(language: string): string {

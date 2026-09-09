@@ -7,10 +7,10 @@ export interface Env {
   CLOUDFLARE_ACCOUNT_ID: string
   CLOUDFLARE_API_TOKEN: string
   CLOUDFLARE_AI_SEARCH_INSTANCE: string
-  ZAI_API_KEY: string
-  ZAI_BASE_URL: string
-  ZAI_LLM_MODEL: string
-  ZAI_FALLBACK_LLM_MODEL: string
+  GEMINI_API_KEY: string
+  GEMINI_BASE_URL: string
+  GEMINI_LLM_MODEL: string
+  GEMINI_FALLBACK_LLM_MODEL: string
   LLM_MAX_TOKENS: string
   JWT_SECRET_KEY: string
   JWT_ALGORITHM?: string
@@ -29,10 +29,8 @@ export interface Env {
   SESSION_MEMORY_MESSAGES: string
   SESSION_MEMORY_MAX_TOKENS: string
   SESSION_TIMEOUT_MINUTES: string
-  EDGE_TTS_VOICE_EN: string
-  EDGE_TTS_VOICE_ES: string
-  EDGE_TTS_RATE: string
-  TTS_MODEL: string
+  TTS_MODEL_ES: string
+  TTS_MODEL_EN: string
   TTS_MAX_TOTAL_CHARS: string
   CORS_ORIGINS: string
   DEBUG: string

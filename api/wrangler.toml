@@ -3,27 +3,20 @@ main = "src/index.ts"
 compatibility_date = "2024-09-25"
 compatibility_flags = ["nodejs_compat"]
 
-# ── D1 (relational DB) ─────────────────────────────────────────────
-# Create once with: wrangler d1 create virtual-professor-db
-# Then replace <D1_DATABASE_ID> below.
 [[d1_databases]]
 binding = "DB"
 database_name = "virtual-professor-db"
 database_id = "e54e1e43-8de6-4b1d-8f7d-014a670db5bc"
 migrations_dir = "migrations"
 
-# ── Workers AI (text-to-speech: @cf/myshell-ai/melotts) ──────────────────
 [ai]
 binding = "AI"
 
-# ── Environment variables (fill via `wrangler secret put` for tokens) ──
 [vars]
-DEBUG = "false"
-ZAI_BASE_URL = "https://api.z.ai/api/paas/v4"
-ZAI_LLM_MODEL = "glm-4.7-flash"
-ZAI_FALLBACK_LLM_MODEL = "glm-4.5-flash"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+GEMINI_LLM_MODEL = "gemini-3.5-flash-lite"
+GEMINI_FALLBACK_LLM_MODEL = "gemini-3.5-flash"
 LLM_MAX_TOKENS = "350"
-JWT_ALGORITHM = "HS256"
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = "30"
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = "7"
 ADMIN_NAME = "Administrator"
@@ -35,15 +28,9 @@ UPLOAD_ALLOWED_FORMATS = "pdf,docx,pptx,txt,url"
 PROFESSOR_MAX_DOCUMENTS = "100"
 SESSION_MEMORY_MESSAGES = "10"
 SESSION_MEMORY_MAX_TOKENS = "4096"
-SESSION_TIMEOUT_MINUTES = "30"
-EDGE_TTS_VOICE_EN = "en-US-JennyNeural"
-EDGE_TTS_VOICE_ES = "es-ES-ElviraNeural"
-EDGE_TTS_RATE = "+0%"
 TTS_MAX_TOTAL_CHARS = "6000"
-
-# CORS_ORIGINS is a JSON array string, e.g. ["https://app.pages.dev","http://localhost:3000"]
+TTS_MODEL_ES = "@cf/deepgram/aura-2-es"
+TTS_MODEL_EN = "@cf/deepgram/aura-2-en"
 CORS_ORIGINS = "[\"https://virtual-professor-frontend.ailabtools.workers.dev\",\"http://localhost:3000\",\"http://127.0.0.1:3000\",\"http://localhost:8788\",\"http://127.0.0.1:8788\"]"
 
-# Secrets (put with `wrangler secret put`): CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN,
-# CLOUDFLARE_AI_SEARCH_INSTANCE, ZAI_API_KEY, JWT_SECRET_KEY, ADMIN_API_KEY,
-# ADMIN_EMAIL, ADMIN_PASSWORD
+# Set secrets with `wrangler secret put`.

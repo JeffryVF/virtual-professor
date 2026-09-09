@@ -189,11 +189,10 @@ app.post('/:sessionId/speak', async (c) => {
           contextChunks,
           { lowRelevance },
         )
-      } catch {
+      } catch (err) {
+        console.error('LLM generation failed:', err)
         return c.json(
-          {
-            detail: JSON.stringify({ detail: 'El profesor está pensando... Intenta de nuevo.', step: 'llm' }),
-          },
+          { detail: 'El profesor está pensando... Intenta de nuevo.', step: 'llm' },
           503,
         )
       }
@@ -229,12 +228,9 @@ app.post('/:sessionId/speak', async (c) => {
 
   const maxChars = int(c.env, 'TTS_MAX_TOTAL_CHARS', 6000)
   const speechText = truncateForTtsText(responseText, maxChars)
-  const voice = responseLang === 'es' ? c.env.EDGE_TTS_VOICE_ES : c.env.EDGE_TTS_VOICE_EN
-
   try {
     const result = await synthesize(c.env, speechText, {
-      voice,
-      rate: c.env.EDGE_TTS_RATE ?? '+0%',
+      language: responseLang,
     })
     if (result.ok) {
       const body =

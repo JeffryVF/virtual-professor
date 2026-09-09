@@ -41,7 +41,7 @@ app.get('/health', async (c) => {
   const services = {
     postgres,
     redis: { status: 'healthy', latency_ms: 0, error: null } as ServiceProbe,
-    zai: { status: 'healthy', latency_ms: 0, error: null } as ServiceProbe,
+    gemini: { status: 'healthy', latency_ms: 0, error: null } as ServiceProbe,
     cloudflare,
   }
   const status = postgres.status === 'healthy' && cloudflare.status === 'healthy' ? 'healthy' : 'degraded'

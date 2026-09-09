@@ -1,10 +1,7 @@
 import type { Env } from '../types'
 
 export interface TtsOptions {
-  voice: string
-  rate?: string
-  pitch?: string
-  volume?: string
+  language: string
 }
 
 export interface SynthesisResult {
@@ -12,12 +9,8 @@ export interface SynthesisResult {
   ok: boolean
 }
 
-const AURA_ES = '@cf/deepgram/aura-2-es'
-const AURA_EN = '@cf/deepgram/aura-2-en'
-
-function spanishVoice(voice: string): boolean {
-  return voice.toLowerCase().startsWith('es')
-}
+const DEFAULT_MODEL_ES = '@cf/deepgram/aura-2-es'
+const DEFAULT_MODEL_EN = '@cf/deepgram/aura-2-en'
 
 function decodeBase64Audio(value: string): Uint8Array {
   const encoded = value.startsWith('data:') ? value.slice(value.indexOf(',') + 1) : value
@@ -75,7 +68,9 @@ export async function synthesize(env: Env, text: string, options: TtsOptions): P
     return { audio: new Uint8Array(0), ok: false }
   }
   try {
-    const model = spanishVoice(options.voice) ? AURA_ES : AURA_EN
+    const model = options.language.toLowerCase().startsWith('es')
+      ? env.TTS_MODEL_ES || DEFAULT_MODEL_ES
+      : env.TTS_MODEL_EN || DEFAULT_MODEL_EN
     const result = await env.AI.run(model, {
       text,
       encoding: 'mp3',
